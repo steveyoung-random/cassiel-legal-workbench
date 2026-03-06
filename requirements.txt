@@ -1,0 +1,15 @@
+# Cassiel Legal Workbench - Python dependencies
+# Python 3.13 or later required
+#
+# Install: pip install -r requirements.txt
+#
+# Optional: install python-Levenshtein alongside thefuzz for faster
+# fuzzy string matching (not required, but recommended):
+#   pip install python-Levenshtein
+
+anthropic>=0.84.0
+openai>=2.24.0
+lxml>=6.0.2
+beautifulsoup4>=4.14.3
+thefuzz>=0.22.1
+streamlit>=1.55.0

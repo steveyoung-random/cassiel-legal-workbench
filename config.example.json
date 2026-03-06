@@ -1,0 +1,217 @@
+{
+  "_comment": "Copy this file to config.json and adjust as needed. config.json is excluded from version control.",
+
+  "models": {
+        "claude-opus-4-5": {
+            "platform": "Claude",
+            "model": "claude-opus-4-5",
+            "max_tokens": 8000
+        },
+        "claude-sonnet-4-5": {
+            "platform": "Claude",
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 8000
+        },
+        "claude-haiku-4-5": {
+            "platform": "Claude",
+            "model": "claude-haiku-4-5",
+            "max_tokens": 8000
+        },
+        "gpt-5": {
+            "platform": "OpenAI",
+            "model": "gpt-5",
+            "max_tokens": 8000
+        },
+        "gpt-5-mini": {
+            "platform": "OpenAI",
+            "model": "gpt-5-mini",
+            "max_tokens": 8000
+        },
+        "gpt-5-nano": {
+            "platform": "OpenAI",
+            "model": "gpt-5-nano",
+            "max_tokens": 8000
+        },
+        "gpt-5.1": {
+            "platform": "OpenAI",
+            "model": "gpt-5.1",
+            "max_tokens": 8000
+        },
+        "gpt-5.2": {
+            "platform": "OpenAI",
+            "model": "gpt-5.2",
+            "max_tokens": 8000
+        }
+  },
+
+  "_comment_current_engine": "Default model used for any task not explicitly assigned in model_assignments.",
+  "current_engine": "gpt-5-nano",
+
+  "model_assignments": {
+    "_comment_available_tasks": "============================================================",
+    "_comment_task_list": [
+      "STAGE 2: DEFINITION EXTRACTION AND SCOPE RESOLUTION",
+      "  stage2.definitions.extract_terms           - Extract defined terms from item text",
+      "  stage2.definitions.extract_definition      - Extract definition for specific term",
+      "  stage2.definitions.extract_scope           - Extract scope phrase from definition",
+      "  stage2.definitions.extract_scope_with_indirect - Extract scope for definitions with indirect references",
+      "  stage2.definitions.resolve_scope           - Resolve scope phrase to document locations",
+      "  stage2.definitions.evaluate_quality        - Evaluate definition quality",
+      "  stage2.definitions.retry_extraction        - Retry poor quality definition extraction",
+      "  stage2.definitions.construct_from_target   - Build definition from target location",
+      "  stage2.definitions.validate_external       - Validate external reference",
+      "  stage2.definitions.resolve_indirect        - Resolve indirect reference location",
+      "  stage2.definitions.detect_elaborative      - Detect elaborative relationship",
+      "  stage2.definitions.resolve_conflict        - Resolve conflicting definitions",
+      "  stage2.definitions.review_high_conflict    - Review high-conflict terms for genuine definitions",
+      "",
+      "STAGE 3: SUMMARIZATION",
+      "  stage3.summary.organizational              - Generate organizational unit summary",
+      "  stage3.summary.level1                      - Generate level 1 item summary (basic)",
+      "  stage3.summary.level1_with_references      - Generate level 1 with reference extraction",
+      "  stage3.summary.level2                      - Generate level 2 item summary (detailed)",
+      "  stage3.summary.topic_statement             - Generate document topic statement",
+      "  stage3.summary.table                       - Generate structural summary for large table sub-unit",
+      "",
+      "STAGE 4: QUESTION ANSWERING",
+      "  qa.relevance.score                         - Score item relevance to question",
+      "  qa.analysis.analyze_chunk                  - Analyze chunk for question (iterative)",
+      "  qa.synthesis.cleanup_scratch               - Cleanup scratch document",
+      "  qa.synthesis.final_answer                  - Generate final narrative answer",
+      "",
+      "CROSS-REFERENCE REGISTRY",
+      "  registry.resolution.ai                     - AI-assisted resolution for unparseable citations (--ai flag)",
+      "",
+      "USAGE:",
+      "  If a task is not specified here, it uses the model from 'current_engine'",
+      "  Example: \"stage3.summary.topic_statement\": \"gpt-5\" uses GPT-5 for topic statements",
+      "============================================================"
+    ],
+
+    "_comment_example_assignments": "Example model assignments (uncomment and modify as needed):",
+    "_example_stage3.summary.level2": "gpt-5",
+    "_example_registry.resolution.ai": "claude-haiku-4-5",
+    "stage2.definitions.resolve_indirect": "gpt-5.2",
+    "stage2.definitions.extract_scope_with_indirect": "gpt-5.2",
+    "stage2.definitions.evaluate_quality": "gpt-5.2",
+    "stage2.definitions.retry_extraction": "gpt-5.2",
+    "stage2.definitions.resolve_conflict": "gpt-5.2",
+    "stage2.definitions.review_high_conflict": "claude-opus-4-5",
+    "stage3.summary.topic_statement": "gpt-5.2",
+    "stage3.summary.table": "claude-sonnet-4-6",
+    "qa.relevance.score": "gpt-5-mini",
+    "qa.analysis.analyze_chunk": "gpt-5.2",
+    "qa.synthesis.cleanup_scratch": "gpt-5.2",
+    "qa.synthesis.final_answer": "gpt-5.2"
+  },
+
+  "retry": {
+    "_comment": "============================================================",
+    "_comment_description": "Retry and Fallback Configuration",
+    "_comment_purpose": "Configure how many times to retry with each model and which fallback models to use",
+    "_comment_max_retries": "Number of retries with each model before trying the next fallback (default: 3)",
+    "_comment_fallback_models": "Global fallback models tried when primary model fails (tried in order)",
+    "_comment_task_specific": "Task-specific fallback models override global fallbacks",
+    "_comment_example": "Example: stage3.summary.topic_statement.fallback_models: ['gpt-5', 'claude-sonnet-4-5']",
+    "_comment_end": "============================================================",
+
+    "max_retries_per_model": 3,
+    "fallback_models": ["gpt-5.2", "claude-sonnet-4-5"],
+    "qa.analysis.analyze_chunk.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
+    "qa.synthesis.cleanup_scratch.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
+    "qa.synthesis.final_answer.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
+    "stage3.summary.topic_statement.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
+
+    "_comment_task_specific_examples": "Task-specific fallback examples (uncomment to use):",
+    "_example_stage3.summary.topic_statement.fallback_models": ["gpt-5", "claude-sonnet-4-5", "gpt-5-mini"]
+  },
+
+  "log_stem": "log",
+  "similarity_threshold": 87,
+  "max_iteration_count": 3,
+
+  "output": {
+    "_comment": "Directory where processed documents are stored. Supports ~ for home directory.",
+    "directory": "~/document_analyzer_output",
+    "structure": "per_document"
+  },
+
+  "processing": {
+    "default_checkpoint_threshold": 30,
+    "default_parse_mode": "split_chapters"
+  },
+
+  "_comment_extract_refs_ai_pass": "Run AI resolution pass after Stage 3 (registry/post_stage3.py). Resolves citations with non-standard formatting that regex cannot parse. Uses model assigned to registry.resolution.ai. Default: false (regex-only resolution).",
+  "extract_refs_ai_pass": false,
+
+  "question_answering_modes": {
+    "quick_scan": {
+      "scoring_summary_level": "summary_1",
+      "org_summary_scoring": true,
+      "stop_after_scoring": true,
+      "max_analysis_passes": 0,
+      "quality_check_phase": false,
+      "analyze_zero_score_sections": false,
+      "scoring_fallback_to_summary_2": false,
+      "scoring_batch_max_chars": 10000,
+      "scoring_batch_max_items": 10
+    },
+    "quick_full_scan": {
+      "scoring_summary_level": "summary_1",
+      "org_summary_scoring": false,
+      "stop_after_scoring": true,
+      "max_analysis_passes": 0,
+      "quality_check_phase": false,
+      "analyze_zero_score_sections": false,
+      "scoring_fallback_to_summary_2": false,
+      "scoring_batch_max_chars": 10000,
+      "scoring_batch_max_items": 10
+    },
+    "standard": {
+      "scoring_summary_level": "summary_1",
+      "org_summary_scoring": true,
+      "stop_after_scoring": false,
+      "max_analysis_passes": 3,
+      "quality_check_phase": false,
+      "analyze_zero_score_sections": false,
+      "scoring_fallback_to_summary_2": false,
+      "scoring_batch_max_chars": 10000,
+      "scoring_batch_max_items": 10,
+      "score_1_gate": true,
+      "deduplicate_new_facts": true,
+      "compact_after_additions": 8,
+      "implicit_reference_detection": true
+    },
+    "thorough": {
+      "scoring_summary_level": "summary_2",
+      "org_summary_scoring": false,
+      "stop_after_scoring": false,
+      "max_analysis_passes": 5,
+      "quality_check_phase": false,
+      "analyze_zero_score_sections": false,
+      "scoring_fallback_to_summary_2": true,
+      "scoring_batch_max_chars": 10000,
+      "scoring_batch_max_items": 10,
+      "score_1_gate": true,
+      "deduplicate_new_facts": true,
+      "compact_after_additions": 8,
+      "implicit_reference_detection": true
+    },
+    "maximum_confidence": {
+      "scoring_summary_level": "summary_2",
+      "org_summary_scoring": false,
+      "stop_after_scoring": false,
+      "max_analysis_passes": 5,
+      "quality_check_phase": true,
+      "analyze_zero_score_sections": true,
+      "scoring_fallback_to_summary_2": true,
+      "scoring_batch_max_chars": 10000,
+      "scoring_batch_max_items": 10,
+      "score_1_gate": true,
+      "deduplicate_new_facts": true,
+      "compact_after_additions": 8,
+      "implicit_reference_detection": true
+    }
+  },
+  "default_qa_mode": "standard"
+}

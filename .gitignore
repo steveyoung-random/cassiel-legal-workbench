@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+.pytest_cache/
+
+# Secrets
+api_keys.py
+config.json
+
+# Internal development instructions
+CLAUDE.md
+ROADMAP.md
+STATUS.md
+LESSONS_LEARNED.md
+
+# Runtime data
+api_cache.json
+jobs.db
+problems.json
+elements_report.txt
+test_output.txt
+session-history.txt
+
+# IDE
+.vscode/
+*.code-workspace
+.idea/
+.cursor/
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+document_issues*.json
+parsing_issues*.json
+
+#Other
+ECFR-XML-User-Guide.md
+UI_STYLE_GUIDE.md
+UNIFIED_TREE_MODEL_CONCEPT.md
+testing/
+archive/
+.obsidian/
