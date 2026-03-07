@@ -1592,6 +1592,7 @@ def parse_appendix(
     if pending_large_tables and not item_entry.get("sub_units"):
         param_pointer = content["document_information"]["parameters"]
         table_param_key = find_or_create_table_param_key(param_pointer)
+        table_type_name = param_pointer[table_param_key]['name']
         table_key_str = str(table_param_key)
         di = content["document_information"]
         di.setdefault("sub_unit_index", {})
@@ -1609,7 +1610,7 @@ def parse_appendix(
             # Replace the pending placeholder with the final key-based marker.
             current_text = current_text.replace(
                 f"[Table {local_num} pending sub-unit extraction]",
-                f"[Table {local_num} extracted as sub-unit table {sub_unit_key}]",
+                f"[Table {local_num} extracted as sub-unit {table_type_name} {sub_unit_key}]",
             )
             table_sub_units[sub_unit_key] = sub_unit
             index_entries[sub_unit_key] = {
@@ -2568,7 +2569,9 @@ def process_file(
 
 
 def process_directory(dir_path: str, config: Optional[Dict[str, Any]] = None,
-                      recursive: bool = True) -> None:
+                      recursive: bool = True,
+                      parse_mode: str = 'auto',
+                      specific_units: Optional[Dict[str, str]] = None) -> None:
     """
     Process directory of eCFR XML files.
 
@@ -2576,12 +2579,14 @@ def process_directory(dir_path: str, config: Optional[Dict[str, Any]] = None,
         dir_path: Path to directory or file
         config: Configuration dictionary (optional)
         recursive: Whether to process subdirectories
+        parse_mode: 'auto', 'split', or 'full'
+        specific_units: Optional filter dict (e.g., {'part': '17'})
     """
     config = config or get_config()
 
     if os.path.isfile(dir_path):
         if dir_path.endswith('.xml'):
-            process_file(dir_path, config)
+            process_file(dir_path, config, parse_mode=parse_mode, specific_units=specific_units)
         return
 
     if not os.path.isdir(dir_path):
@@ -2590,10 +2595,10 @@ def process_directory(dir_path: str, config: Optional[Dict[str, Any]] = None,
     for item in os.listdir(dir_path):
         item_path = os.path.join(dir_path, item)
         if os.path.isfile(item_path) and item.endswith('.xml'):
-            process_file(item_path, config)
+            process_file(item_path, config, parse_mode=parse_mode, specific_units=specific_units)
         elif recursive and os.path.isdir(item_path):
             print(f'Moving to directory: {item_path}')
-            process_directory(item_path, config, recursive)
+            process_directory(item_path, config, recursive, parse_mode=parse_mode, specific_units=specific_units)
 
 
 def main() -> None:
@@ -2628,8 +2633,8 @@ def main() -> None:
     config = get_config(args.config)
     specific_units = parse_filter_string(args.specific) if args.specific else None
 
-    if os.path.isdir(args.input_path) and args.mode != 'full':
-        process_directory(args.input_path, config)
+    if os.path.isdir(args.input_path):
+        process_directory(args.input_path, config, parse_mode=args.mode, specific_units=specific_units)
     else:
         process_file(args.input_path, config, parse_mode=args.mode, specific_units=specific_units)
 

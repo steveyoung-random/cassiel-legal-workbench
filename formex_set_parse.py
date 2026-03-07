@@ -273,6 +273,7 @@ def _register_pending_large_tables(
         return
     param_pointer = parsed_content['document_information']['parameters']
     table_param_key = find_or_create_table_param_key(param_pointer)
+    table_type_name = param_pointer[table_param_key]['name']
     table_key_str = str(table_param_key)
     di = parsed_content['document_information']
     di.setdefault('sub_unit_index', {})
@@ -290,7 +291,7 @@ def _register_pending_large_tables(
         )
         current_text = current_text.replace(
             f"[Table {local_num} pending sub-unit extraction]",
-            f"[Table {local_num} extracted as sub-unit table {sub_unit_key}]",
+            f"[Table {local_num} extracted as sub-unit {table_type_name} {sub_unit_key}]",
         )
         table_sub_units[sub_unit_key] = sub_unit
         index_entries[sub_unit_key] = {

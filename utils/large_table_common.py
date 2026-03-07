@@ -43,21 +43,34 @@ def assign_table_key(local_num: int, parent_id: str, taken: Set[str]) -> str:
 
 def find_or_create_table_param_key(param_pointer: Dict[str, Any]) -> int:
     """
-    Find the parameter key for the generic 'table' data-table type.
+    Find the parameter key for the data-table sub-unit type.
+
+    Identified by data_table: 1 + is_sub_unit: True (not by name, since the name
+    may be 'table' or 'large_table' depending on whether 'table' was already taken
+    by a regular non-sub-unit operational parameter when the entry was first created).
 
     If not already registered, allocates the next available integer key
     (max existing integer key + 1) and registers the parameter entry.
+    Uses name 'table' unless that name is already taken by a non-sub-unit parameter,
+    in which case it uses 'large_table' to avoid the conflict.
     Returns the integer key.
     """
     for key, p in param_pointer.items():
-        if p.get('data_table') and p.get('is_sub_unit') and p.get('name') == 'table':
+        if p.get('data_table') and p.get('is_sub_unit'):
             return int(key) if isinstance(key, str) else key
+    # Determine name: use 'table' unless a non-sub-unit param already claims it.
+    non_sub_unit_names = {p['name'] for p in param_pointer.values()
+                          if not p.get('is_sub_unit') and 'name' in p}
+    if 'table' in non_sub_unit_names:
+        name, name_plural = 'large_table', 'large_tables'
+    else:
+        name, name_plural = 'table', 'tables'
     # Allocate next available key
     int_keys = [k for k in param_pointer if isinstance(k, int)]
     next_key = max(int_keys) + 1 if int_keys else 10
     param_pointer[next_key] = {
-        "name": "table",
-        "name_plural": "tables",
+        "name": name,
+        "name_plural": name_plural,
         "operational": 1,
         "is_sub_unit": True,
         "data_table": 1,

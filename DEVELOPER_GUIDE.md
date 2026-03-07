@@ -26,7 +26,7 @@ Cassiel Legal Workbench transforms legal documents (XML/HTML) into AI-enhanced J
 - Four parsers: USLM (USC), Formex (EU), CA HTML, CFR eCFR
 - Extracts organizational structure, text, notes, breakpoints
 - CFR parser v0.5: very long substantive units are automatically subdivided into nested sub-units (e.g., 638 ECCNs in the Commerce Control List become individually-processable sub-units)
-- **Large HTML tables** (≥50 `<TR>` rows) are extracted as `table` sub-units (dynamic param key; `is_sub_unit: True`, `data_table: 1`). Keys are numeric (`"1"`, `"2"`, …) matching the natural table numbers in prose. `text = ""`; full HTML stored in `table_html`; `summary_1` set by Stage 3. Parser-specific subdivision (CCL) takes precedence; `table` sub-unit is the generic fallback. See `LARGE_TABLE_HANDLING.md` for full design.
+- **Large HTML tables** (≥50 `<TR>` rows) are extracted as `table` sub-units (dynamic param key; `is_sub_unit: True`, `data_table: 1`). Name is `"table"` unless a non-sub-unit parameter already uses that name, in which case `"large_table"` is used. Keys are numeric (`"1"`, `"2"`, …) matching the natural table numbers in prose. `text = ""`; full HTML stored in `table_html`; `summary_1` set by Stage 3. Downstream stages identify data-table types by the `data_table: 1` flag, never by name. Parser-specific subdivision (CCL) takes precedence; the `table`/`large_table` sub-unit is the generic fallback. See `LARGE_TABLE_HANDLING.md` for full design.
 
 **Stage 2: Definition Processing** (`Process_Stage_2.py`, `stage2/`)
 - AI-powered definition extraction from legal text

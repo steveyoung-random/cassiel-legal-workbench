@@ -94,65 +94,20 @@ def get_full_item_name_set(parsed_content):
             item_name_set.add(item_type_name)
     return item_name_set
 
-def _toc_sub_units(param_pointer, parent_item, indent_level):
-    """
-    Recursively generate TOC lines for sub-units within a container.
-
-    For each sub-unit type:
-    - Container sub-units (those with further sub_units) are listed individually on
-      their own lines and recursively expanded.
-    - Leaf sub-units (no further sub_units) are collected and formatted as a single
-      compact comma-separated line: "Ccl_sections 0A001, 0A002, and 0A003".
-
-    This mirrors the compact format used for leaf substantive units under org units.
-    """
-    lines = ''
-    indent = '    ' * indent_level
-    for sub_type_key, sub_type_items in parent_item['sub_units'].items():
-        sub_p = _resolve_param_key(param_pointer, sub_type_key)
-        sub_type_name = sub_p['name'] if sub_p else str(sub_type_key)
-        sub_type_name_plural = sub_p['name_plural'] if sub_p else sub_type_name + 's'
-        cap_name = sub_type_name[:1].upper() + sub_type_name[1:] if sub_type_name else ''
-        cap_plural = sub_type_name_plural[:1].upper() + sub_type_name_plural[1:] if sub_type_name_plural else ''
-
-        leaf_keys = []
-        for sub_key, sub_item in sub_type_items.items():
-            if has_sub_units(sub_item):
-                # Flush any accumulated leaves before this container
-                if leaf_keys:
-                    if len(leaf_keys) == 1:
-                        lines += indent + cap_name + ' ' + leaf_keys[0] + '\n'
-                    else:
-                        lines += indent + cap_plural + ' ' + get_list_string(leaf_keys, 'and') + '\n'
-                    leaf_keys = []
-                # Container sub-unit: list individually and recurse
-                lines += indent + cap_name + ' ' + sub_key + '\n'
-                lines += _toc_sub_units(param_pointer, sub_item, indent_level + 1)
-            else:
-                leaf_keys.append(sub_key)
-
-        # Flush any remaining leaves
-        if leaf_keys:
-            if len(leaf_keys) == 1:
-                lines += indent + cap_name + ' ' + leaf_keys[0] + '\n'
-            else:
-                lines += indent + cap_plural + ' ' + get_list_string(leaf_keys, 'and') + '\n'
-
-    return lines
-
-
 def _toc_substantive_items(parsed_content, item_name, item_name_plural, cap_item_name, first_item, last_item, indent_level):
     """
-    Generate TOC lines for a range of substantive items, expanding sub-units when present.
+    Generate TOC lines for a range of substantive items.
 
-    Container items (those with sub_units) are listed individually on their own lines
-    and recursively expanded.  Leaf items (no sub_units) are collected and formatted as
-    a single compact comma-separated line: "Sections 774.1, 774.2, and 774.3".
+    Container items (those with sub_units) are listed individually on their own lines.
+    Leaf items (no sub_units) are collected and formatted as a single compact
+    comma-separated line: "Sections 774.1, 774.2, and 774.3".
+
+    Sub-units are not expanded in the TOC — they are implementation details of the
+    parent item, not separately addressable units.
     """
     lines = ''
     content_pointer = parsed_content.get('content', {})
     items_dict = content_pointer.get(item_name_plural, {})
-    param_pointer = parsed_content.get('document_information', {}).get('parameters', {})
     indent = '    ' * indent_level
     cap_singular = item_name[:1].upper() + item_name[1:] if item_name else ''
     cap_plural = item_name_plural[:1].upper() + item_name_plural[1:] if item_name_plural else ''
@@ -172,9 +127,8 @@ def _toc_substantive_items(parsed_content, item_name, item_name_plural, cap_item
                     else:
                         lines += indent + cap_plural + ' ' + get_list_string(leaf_keys, 'and') + '\n'
                     leaf_keys = []
-                # Container: list individually and expand sub-units
+                # Container: list individually but do not expand sub-units
                 lines += indent + cap_singular + ' ' + item_key + '\n'
-                lines += _toc_sub_units(param_pointer, unit, indent_level + 1)
             else:
                 leaf_keys.append(item_key)
         if item_key == last_item:

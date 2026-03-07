@@ -59,7 +59,7 @@ Parameter entry (key assigned dynamically — the next available integer key in 
 }
 ```
 
-The `data_table: 1` flag distinguishes this `table` type from any hypothetical organizational unit type that might also be named "table" in a future document format. The parameter key is **not hardcoded** — it is assigned dynamically by `_find_or_create_table_param_key()` in `cfr_set_parse.py` when the first large table is encountered.
+The name is `"table"` in most documents. If `"table"` is already taken by a regular non-sub-unit operational parameter (e.g., a CFR title that uses appendix-style "Table" items), the name falls back to `"large_table"` / `"large_tables"` to avoid the collision. The parameter key is **not hardcoded** — it is assigned dynamically by `find_or_create_table_param_key()` in `utils/large_table_common.py`.
 
 Sub-unit keys are derived from the local table counter within the parent item: `"1"`, `"2"`, etc. These match the natural labels used in document prose ("Table 1", "Table 2") and in Stage 4 prompts, so analysts can directly connect a prose reference like "refer to Table 1 below" to the extracted sub-unit. If a key would collide with a key already registered in the document-level index (two different parent items both producing "Table 1"), a short suffix derived from the parent ID is appended (e.g., `"1_rt744"`).
 
@@ -169,11 +169,11 @@ Over time, parsers for specific document types can produce semantically structur
 
 ## 9. Type Name, Key, and Collision Safety
 
-The type is named `"table"` to match the natural language used in document prose — Stage 4 prompt headers read `"Table 1: Table 1"`, matching cross-references like "refer to Table 1 below".
+The type is normally named `"table"` to match the natural language used in document prose — Stage 4 prompt headers read `"Table 1: Table 1"`, matching cross-references like "refer to Table 1 below".
 
-The `data_table: 1` parameter flag distinguishes this extracted data-table type from any hypothetical organizational unit type also named `"table"` in a future document format. The combination of `is_sub_unit: True` and `data_table: 1` makes the type unambiguous.
+**Name collision avoidance**: Some CFR titles already have a regular non-sub-unit operational parameter named `"table"` (e.g., appendix-style "Table to Part N" items). In that case, `find_or_create_table_param_key()` detects the conflict and uses `"large_table"` / `"large_tables"` instead. Downstream stages never check for a specific name — they identify data-table sub-units by the `data_table: 1` + `is_sub_unit: True` combination, so the name change is transparent.
 
-**No hardcoded parameter key**: The parameter key is assigned by `_find_or_create_table_param_key()`, which searches `document_information.parameters` for an existing `data_table: 1` entry and returns its key, or allocates the next available integer key if none exists. Downstream stages (2, 3, 4) detect data-table items by building a set of type names from `data_table: 1` entries — never by checking `item_type_name == "table"` directly.
+**No hardcoded parameter key**: The parameter key is assigned by `find_or_create_table_param_key()` in `utils/large_table_common.py`, which searches `document_information.parameters` for an existing `data_table: 1` + `is_sub_unit: True` entry and returns its key, or allocates the next available integer key if none exists.
 
 ---
 

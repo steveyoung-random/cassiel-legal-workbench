@@ -79,6 +79,7 @@ def _register_ca_large_tables(content, item_pointer, pending_large_tables, secti
         return
     param_pointer = content['document_information']['parameters']
     table_param_key = find_or_create_table_param_key(param_pointer)
+    table_type_name = param_pointer[table_param_key]['name']
     table_key_str = str(table_param_key)
     di = content['document_information']
     di.setdefault('sub_unit_index', {})
@@ -95,7 +96,7 @@ def _register_ca_large_tables(content, item_pointer, pending_large_tables, secti
         sub_unit = _build_ca_table_sub_unit(table_tag, local_num, parent_context, section_number)
         current_text = current_text.replace(
             f"[Table {local_num} pending sub-unit extraction]",
-            f"[Table {local_num} extracted as sub-unit table {sub_unit_key}]",
+            f"[Table {local_num} extracted as sub-unit {table_type_name} {sub_unit_key}]",
         )
         table_sub_units[sub_unit_key] = sub_unit
         index_entries[sub_unit_key] = {

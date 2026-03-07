@@ -113,6 +113,7 @@ def extract_large_tables(
     parent_type_name: str,
     parent_id: str,
     existing_keys: Optional[Set[str]] = None,
+    table_type_name: str = "table",
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
     Scan ``text`` for large HTML TABLE elements and extract them as sub-units.
@@ -180,7 +181,7 @@ def extract_large_tables(
         # Inline placeholder — references both the natural table number and
         # the assigned key so the LLM can connect prose references ("Table 1")
         # to the sub-unit identifier.
-        placeholder = f"[Table {local_counter} extracted as sub-unit table {sub_unit_key}]"
+        placeholder = f"[Table {local_counter} extracted as sub-unit {table_type_name} {sub_unit_key}]"
 
         # Replace this occurrence in modified_text
         start = match.start() + offset_adjustment
