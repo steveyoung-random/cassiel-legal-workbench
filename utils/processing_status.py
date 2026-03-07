@@ -162,12 +162,25 @@ def count_stage_3_progress(parsed_content: Dict[str, Any]) -> tuple:
 
     operational = {'total': 0, 'summary_1': 0, 'summary_2': 0}
 
+    # Build set of data-table type names.  These items only ever receive summary_1
+    # (a structural description of the table); level-2 processing is intentionally
+    # skipped for them.  They are fully processed when summary_1 is present, so
+    # treat that as satisfying the summary_2 slot in the completion check.
+    param_pointer = parsed_content.get('document_information', {}).get('parameters', {})
+    data_table_type_names = {
+        p['name'] for p in param_pointer.values()
+        if p.get('data_table') and p.get('name')
+    }
+
     # Count operational items
-    for _, _, _, _, working_item in iter_operational_items(parsed_content):
+    for type_name, _, _, _, working_item in iter_operational_items(parsed_content):
         operational['total'] += 1
         if 'summary_1' in working_item and working_item['summary_1']:
             operational['summary_1'] += 1
-        if 'summary_2' in working_item and working_item['summary_2']:
+        if type_name in data_table_type_names:
+            if 'summary_1' in working_item and working_item['summary_1']:
+                operational['summary_2'] += 1
+        elif 'summary_2' in working_item and working_item['summary_2']:
             operational['summary_2'] += 1
 
     # Build scope path for org-unit filtering (if content_scope present)

@@ -507,8 +507,6 @@ def iter_operational_items(parsed_content) -> Iterator[Tuple[str, str, str, str,
 
     Callers that need only leaf nodes can filter with has_sub_units():
         if has_sub_units(working_item): continue
-    Stage 3 summary generation does this because container_summaries() handles containers
-    via aggregation after the leaf-summary pass.
     """
     if ('document_information' not in parsed_content.keys()
         or 'parameters' not in parsed_content['document_information'].keys()

@@ -45,6 +45,7 @@ parsing_issues*.json
 
 #Other
 ECFR-XML-User-Guide.md
+STAGE3_CONTAINER_CONTEXT_FIX.md
 UI_STYLE_GUIDE.md
 UNIFIED_TREE_MODEL_CONCEPT.md
 testing/

@@ -45,7 +45,7 @@ from utils.processing_status import (
     is_stage_3_complete,
     get_processing_status
 )
-from utils.document_handling import iter_operational_items, iter_containers, has_sub_units, lookup_item, build_metadata_suffix, augment_chunk_with_metadata
+from utils.document_handling import iter_operational_items, has_sub_units, lookup_item, build_metadata_suffix, augment_chunk_with_metadata, _resolve_param_key
 from utils.text_processing import clean_summary_text, strip_emphasis_marks
 from utils.chunking_helpers import create_chunk_summary_prompt, synthesize_final_summary
 from utils.manifest_utils import discover_parse_files, parse_filter_string
@@ -1094,97 +1094,322 @@ def _get_parent_key(parsed_content, working_item):
     return None
 
 
-def container_summaries(proc, summary_number):
+
+def _summarize_leaf_level1(type_name, type_plural, cap_type_name, item_number, working_item, state):
     """
-    Aggregate sub-unit summaries into each parent container's summary field.
+    Generate a level 1 summary for a single leaf operational item.
 
-    After sub-unit summaries are complete, this function iterates over parent
-    containers (items that have sub_units) and generates an aggregated summary
-    from all sub-unit summaries.  The summary is stored on the parent item's
-    summary_1 or summary_2 field so that organization_summaries() can pick it
-    up normally.
-
-    For v0.3 documents (no containers), iter_containers yields nothing, so this
-    is a no-op with no version check needed.
-
-    Args:
-        proc: SummaryProcessor object
-        summary_number: 1 or 2, indicating which summary level to aggregate
+    Handles three cases: blank text (fixed summary, no AI call), existing summary
+    (idempotency — just append to cumulative context), and new summary (AI call,
+    reference extraction, flush logic).  Updates state in place.
     """
-    client = proc.clients.get('organizational', proc.client)
-    parsed_content = proc.parsed_content
-    logfile = proc.logfile
-    config = proc.config
-    summary_key = f'summary_{summary_number}'
+    parsed_content = state['parsed_content']
+    content_pointer = state['content_pointer']
+    client = state['client']
+    logfile = state['logfile']
+    config = state['config']
+    proc = state['proc']
+    checkpoint_threshold = state['checkpoint_threshold']
 
-    for item_type_name, item_type_name_plural, cap_item_type_name, item_number, working_item in iter_containers(parsed_content):
-        # Skip if parent already has this summary (idempotent for interrupted re-runs)
-        if summary_key in working_item and working_item[summary_key]:
-            continue
+    if '' == working_item['text']:
+        working_item['summary_1'] = cap_type_name + ' is blank.'
+        working_item['defined_terms'] = []
+        working_item['need_ref'] = []
+        return
 
-        # Collect sub-unit summaries
-        # v0.5: sub_units is type-keyed {param_key: {sub_num: sub_item, ...}, ...}
-        sub_summaries = []
-        all_present = True
-        for sub_type_key, sub_type_items in working_item['sub_units'].items():
-            for sub_key, sub_item in sub_type_items.items():
-                if summary_key in sub_item and sub_item[summary_key]:
-                    sub_summaries.append(f'{sub_key}: {sub_item[summary_key]}')
-                else:
-                    all_present = False
-                    break
-            if not all_present:
-                break
+    if 'summary_1' in working_item:  # Existing summary — idempotency path
+        print(f'  [{state["items_processed"][0]+1}/{state["items_needing_summary"]}] Existing: {item_number}')
+        if state['first_flag'][0]:
+            state['first_flag'][0] = False
+            state['cumulative_summary_list'].append(state['cumulative_summary_list_pre'])
+        summary_text = working_item['summary_1']
+        if isinstance(summary_text, list):
+            print(f'    WARNING: summary_1 is a list ({len(summary_text)} items), converting to string')
+            summary_text = ' '.join(summary_text)
+            working_item['summary_1'] = summary_text
+            proc.dirty = 1
+        state['cumulative_summary_list'].append('\n' + cap_type_name + ' ' + item_number + ':\n' + summary_text + '\n')
+        return
 
-        # Skip if any sub-unit is missing its summary (don't aggregate incomplete data)
-        if not all_present or not sub_summaries:
-            continue
+    state['items_processed'][0] += 1
+    print(f'\n  [{state["items_processed"][0]}/{state["items_needing_summary"]}] Processing: {cap_type_name} {item_number}')
 
-        container_text = working_item.get('text', '').strip()
+    # Build base prompt
+    base_prompt = 'Please provide two things in your response: (i) a short (no more than three sentences) summary of this ' + type_name + ' from a longer document, and '
+    base_prompt += '(ii) a list of references that are explicitly cited or mentioned in the text that would be needed to make a better summary.  '
+    base_prompt += 'The summary should not re-iterate which ' + type_name + ' is being summarized, '
+    base_prompt += 'that will be attached to the summary separately.\n\n'
+    base_prompt += 'Please return these two things in JSON format, following the form of this example, with no preamble and no '
+    base_prompt += 'response other than in this JSON format:\n'
+    base_prompt += get_summary_JSON_format(state['type_name_list']) + '\n\n'
+    base_prompt += 'Only include references that are explicitly cited or mentioned in the text being summarized. Use these types:\n'
+    for list_item_type_name in state['type_name_list']:
+        cap_tn = list_item_type_name[0].upper() + list_item_type_name[1:]
+        base_prompt += ' "' + cap_tn + '" - for ' + list_item_type_name + 's mentioned in the text (use the identifier that appears in the table of contents),\n'
+    base_prompt += ' "External" - for references to other documents,\n'
+    base_prompt += ' "Need_Definition" - for terms needing definitions (return the term EXACTLY as it appears in the text, preserving any HTML/XML font markup like <sub>, <sup>, <i>, <b>, etc.).\n\n'
+    reference_guidance = get_reference_instructions(parsed_content)
+    if reference_guidance:
+        base_prompt += 'Reference formatting guidance:\n' + reference_guidance + '\n\n'
+    base_prompt += 'If the text cites a sub-unit that doesn\'t appear in the table of contents (e.g., "' + type_name + ' 12(b)"), report the closest parent that does appear (e.g., "12").\n\n'
 
-        if container_text:
-            # Container has its own substantive text in addition to sub-units.
-            # Generate a combined summary that covers both the container's own content
-            # and the scope of its subsidiary units.
-            prompt = (
-                f'The following is the text content of {cap_item_type_name} {item_number}, '
-                f'followed by summaries of its subsidiary units. '
-                f'Please provide a comprehensive summary that covers the {item_type_name}\'s '
-                f'own content and the scope of its subsidiary entries.\n\n'
-                f'--- {cap_item_type_name} {item_number} content ---\n'
-                f'{container_text}\n\n'
-                f'--- Summaries of subsidiary units ---\n'
-            )
+    # UNIFIED CHUNKING PATH (handles both chunked and non-chunked)
+    text = working_item['text']
+    breakpoints = working_item.get('breakpoints', [])
+    metadata_suffix = build_metadata_suffix(item_number, working_item, content_pointer, type_plural)
+    chunks = list(chunk_text(text, breakpoints, preferred_length=15000))
+    total_chunks = len(chunks)
+    chunk_summaries = []
+    all_references = []
+
+    for i, chunk in enumerate(chunks):
+        augmented_chunk = augment_chunk_with_metadata(chunk, metadata_suffix)
+        chunk_prompt = create_chunk_summary_prompt(
+            base_prompt, augmented_chunk, i + 1, total_chunks,
+            type_name, item_number, chunk_summaries,
+            unit_title=working_item.get('unit_title', '')
+        )
+        print(f'    Chunk {i+1}/{total_chunks} of {cap_type_name} {item_number}...')
+        try:
+            result = query_json(client, state['cumulative_summary_list'], chunk_prompt, logfile,
+                                expected_keys=['summary'], config=config,
+                                task_name='stage3.summary.level1_with_references')
+        except Exception as e:
+            print(f'    ERROR: Failed to query AI for chunk {i+1} of {cap_type_name} {item_number}: {e}')
+            import traceback
+            traceback.print_exc()
+            raise ModelError(f'Failed to get response for chunk {i+1} of {cap_type_name} {item_number}: {e}')
+        print(f'    Chunk {i+1} complete')
+        if not result:
+            raise ModelError('Failed to get response.\n')
+        if 'summary' in result.keys():
+            summary_text = result['summary']
+            if isinstance(summary_text, list):
+                print(f'    WARNING: Chunk {i+1} summary is a list ({len(summary_text)} items), converting to string')
+                summary_text = ' '.join(str(x) for x in summary_text)
+            elif not isinstance(summary_text, str):
+                print(f'    WARNING: Chunk {i+1} summary is not a string (type: {type(summary_text)}), converting to string')
+                summary_text = str(summary_text)
+            chunk_summaries.append(summary_text)
+        if 'references' in result.keys():
+            all_references.extend(result['references'])
+
+    # Synthesize final summary (no-op if only one chunk)
+    try:
+        final_summary = synthesize_final_summary(
+            chunk_summaries, type_name, item_number, client, logfile, config
+        )
+        if isinstance(final_summary, list):
+            print(f'    WARNING: Final summary is a list ({len(final_summary)} items), converting to string')
+            final_summary = ' '.join(str(x) for x in final_summary)
+        elif not isinstance(final_summary, str):
+            print(f'    WARNING: Final summary is not a string (type: {type(final_summary)}), converting to string')
+            final_summary = str(final_summary)
+        if not final_summary:
+            print(f'    WARNING: Empty summary for {cap_type_name} {item_number}')
+            final_summary = f'{cap_type_name} {item_number} summary unavailable'
+        working_item['summary_1'] = final_summary
+        print(f'    [OK] {cap_type_name} {item_number} summary_1 complete ({len(final_summary)} chars)')
+    except Exception as e:
+        print(f'    ERROR: Failed to synthesize summary for {cap_type_name} {item_number}: {e}')
+        import traceback
+        traceback.print_exc()
+        working_item['summary_1'] = f'{cap_type_name} {item_number} summary generation failed: {str(e)}'
+        proc.dirty = 1
+
+    # CRITICAL: Flush immediately after setting summary_1 to prevent data loss
+    try:
+        working_item['need_ref'] = deduplicate_references(all_references)
+        operational_counts, organizational_counts = count_stage_3_progress(parsed_content)
+        update_stage_3_progress(parsed_content, operational_counts, organizational_counts)
+        proc.dirty = 1
+        if proc.should_flush_by_time(time_threshold_seconds=10):
+            proc.flush()
+            print(f'  [Immediate flush] Saved {cap_type_name} {item_number} summary_1 to prevent data loss')
+        if state['items_processed'][0] % checkpoint_threshold == 0:
+            proc.flush()
+            print(f'  [Checkpoint] Progress saved: {operational_counts["summary_1"]}/{operational_counts["total"]} operational items with summary_1')
         else:
-            # Container has no own text: aggregate sub-unit summaries only.
-            prompt = (
-                f'Please provide a concise summary of {cap_item_type_name} {item_number} '
-                f'based on the following summaries of its sub-units. '
-                f'The summary should capture the overall scope and key themes without '
-                f're-iterating which {item_type_name} is being summarized.\n\n'
-            )
+            should_flush = False
+            if state['items_processed'][0] % 5 == 0:
+                should_flush = True
+            elif proc.should_flush_by_time(time_threshold_seconds=30):
+                should_flush = True
+                print(f'  [Time-based flush] Flushing after {int(time_module.time() - proc.last_flush_time)} seconds')
+            if should_flush:
+                proc.flush()
+    except Exception as e:
+        print(f'  [ERROR] Exception after setting summary_1 for {cap_type_name} {item_number}: {e}')
+        print(f'  [SAFETY] Flushing to save {cap_type_name} {item_number} summary_1 before re-raising exception...')
+        try:
+            proc.flush()
+        except Exception as flush_error:
+            print(f'  [CRITICAL] Failed to flush after exception: {flush_error}')
+        raise
+
+    # Add to cumulative context
+    summary_for_context = working_item.get('summary_1', f'{cap_type_name} {item_number} summary')
+    if isinstance(summary_for_context, list):
+        print(f'    WARNING: summary_1 is a list at append time ({len(summary_for_context)} items), converting to string')
+        summary_for_context = ' '.join(str(x) for x in summary_for_context)
+        working_item['summary_1'] = summary_for_context
+        proc.dirty = 1
+    elif not isinstance(summary_for_context, str):
+        print(f'    WARNING: summary_1 is not a string at append time (type: {type(summary_for_context)}), converting to string')
+        summary_for_context = str(summary_for_context)
+        working_item['summary_1'] = summary_for_context
+        proc.dirty = 1
+    if state['first_flag'][0]:
+        state['first_flag'][0] = False
+        state['cumulative_summary_list'].append(state['cumulative_summary_list_pre'])
+    state['cumulative_summary_list'].append('\n' + cap_type_name + ' ' + item_number + ':\n' + summary_for_context + '\n')
+    proc.dirty = 1
+    state['count'][0] -= 1
+
+
+def _summarize_container_level1(type_name, type_plural, cap_type_name, item_number, working_item, state):
+    """
+    Generate a level 1 summary for a container item (one with sub-units).
+
+    Called after all sub-units have been recursively processed by
+    _process_item_level1, so sub-unit summary_1 values are already populated.
+
+    If the container has own substantive text: uses query_json (same as leaf items)
+    to extract both a summary and a reference list.  Single chunk — container
+    own-text is structural preamble, not dense prose.
+
+    If the container is a pure aggregator (no own text): uses query_text_with_retry
+    to synthesize from the sub-unit summaries.
+
+    Both branches pass the current cumulative_summary_list as context so the AI
+    has TOC and prior-item context.
+    """
+    # Idempotency: if already summarised, just add to cumulative context and return
+    if 'summary_1' in working_item and working_item['summary_1']:
+        if state['first_flag'][0]:
+            state['first_flag'][0] = False
+            state['cumulative_summary_list'].append(state['cumulative_summary_list_pre'])
+        state['cumulative_summary_list'].append(
+            '\n' + cap_type_name + ' ' + item_number + ':\n' + working_item['summary_1'] + '\n'
+        )
+        return
+
+    # Collect sub-unit summaries
+    sub_summaries = []
+    all_present = True
+    for sub_type_key, sub_type_items in working_item['sub_units'].items():
+        for sub_key, sub_item in sub_type_items.items():
+            if 'summary_1' in sub_item and sub_item['summary_1']:
+                sub_summaries.append(f'{sub_key}: {sub_item["summary_1"]}')
+            else:
+                all_present = False
+                break
+        if not all_present:
+            break
+
+    if not all_present or not sub_summaries:
+        print(f'  [WARNING] Container {cap_type_name} {item_number}: missing sub-unit summaries, skipping')
+        return
+
+    parsed_content = state['parsed_content']
+    client = state['client']
+    logfile = state['logfile']
+    config = state['config']
+    proc = state['proc']
+    container_text = working_item.get('text', '').strip()
+
+    state['items_processed'][0] += 1
+    print(f'\n  [{state["items_processed"][0]}/{state["items_needing_summary"]}] Processing container: {cap_type_name} {item_number}')
+
+    if container_text:
+        # Container has own text: query_json for summary + references, single chunk.
+        base_prompt = 'Please provide two things in your response: (i) a short (no more than three sentences) summary of this ' + type_name + ' from a longer document, and '
+        base_prompt += '(ii) a list of references that are explicitly cited or mentioned in the text that would be needed to make a better summary.  '
+        base_prompt += 'The summary should not re-iterate which ' + type_name + ' is being summarized, '
+        base_prompt += 'that will be attached to the summary separately.\n\n'
+        base_prompt += 'Please return these two things in JSON format, following the form of this example, with no preamble and no '
+        base_prompt += 'response other than in this JSON format:\n'
+        base_prompt += get_summary_JSON_format(state['type_name_list']) + '\n\n'
+        base_prompt += 'Only include references that are explicitly cited or mentioned in the text being summarized. Use these types:\n'
+        for list_item_type_name in state['type_name_list']:
+            cap_tn = list_item_type_name[0].upper() + list_item_type_name[1:]
+            base_prompt += ' "' + cap_tn + '" - for ' + list_item_type_name + 's mentioned in the text (use the identifier that appears in the table of contents),\n'
+        base_prompt += ' "External" - for references to other documents,\n'
+        base_prompt += ' "Need_Definition" - for terms needing definitions (return the term EXACTLY as it appears in the text, preserving any HTML/XML font markup like <sub>, <sup>, <i>, <b>, etc.).\n\n'
+        reference_guidance = get_reference_instructions(parsed_content)
+        if reference_guidance:
+            base_prompt += 'Reference formatting guidance:\n' + reference_guidance + '\n\n'
+
+        # Combine container text + sub-unit summaries as a single chunk
+        sub_block = '\n[Subsidiary unit summaries:]\n' + '\n'.join(sub_summaries)
+        combined_text = container_text + '\n' + sub_block
+        chunk_prompt = create_chunk_summary_prompt(
+            base_prompt, combined_text, 1, 1, type_name, item_number, [],
+            unit_title=working_item.get('unit_title', '')
+        )
+        try:
+            result = query_json(client, state['cumulative_summary_list'], chunk_prompt, logfile,
+                                expected_keys=['summary'], config=config,
+                                task_name='stage3.summary.level1_with_references')
+        except Exception as e:
+            print(f'    ERROR: Container summary failed for {cap_type_name} {item_number}: {e}')
+            import traceback
+            traceback.print_exc()
+            raise ModelError(f'Container summary failed for {cap_type_name} {item_number}: {e}')
+        if not result:
+            raise ModelError(f'Empty response for container {cap_type_name} {item_number}')
+        summary_text = result.get('summary', '')
+        if isinstance(summary_text, list):
+            summary_text = ' '.join(str(x) for x in summary_text)
+        elif not isinstance(summary_text, str):
+            summary_text = str(summary_text)
+        all_references = result.get('references', [])
+        working_item['summary_1'] = summary_text
+        working_item['need_ref'] = deduplicate_references(all_references)
+        proc.dirty = 1
+        print(f'    [OK] {cap_type_name} {item_number} summary_1 complete ({len(summary_text)} chars)')
+    else:
+        # Pure aggregator: synthesise from sub-unit summaries, passing current context
+        prompt = (
+            f'Please provide a concise summary of {cap_type_name} {item_number} '
+            f'based on the following summaries of its sub-units. '
+            f'The summary should capture the overall scope and key themes without '
+            f're-iterating which {type_name} is being summarized.\n\n'
+        )
         for s in sub_summaries:
             prompt += s + '\n\n'
         prompt += 'Return only the summary text, no preamble.'
-
         try:
             result = query_text_with_retry(
-                client, [], prompt, logfile, max_tokens=0, max_retries=3,
-                config=config, task_name=f'stage3.summary.container_{summary_number}'
+                client, state['cumulative_summary_list'], prompt, logfile,
+                max_tokens=0, max_retries=3, config=config,
+                task_name='stage3.summary.container_1'
             )
             summary_text = clean_summary_text(result)
             if summary_text:
-                working_item[summary_key] = summary_text
+                working_item['summary_1'] = summary_text
                 proc.dirty = 1
-                print(f'  [OK] Container {cap_item_type_name} {item_number} {summary_key} ({len(summary_text)} chars)')
+                print(f'  [OK] Container {cap_type_name} {item_number} summary_1 ({len(summary_text)} chars)')
             else:
-                print(f'  [WARNING] Empty container summary for {cap_item_type_name} {item_number}')
+                print(f'  [WARNING] Empty container summary for {cap_type_name} {item_number}')
+                return
         except Exception as e:
-            print(f'  [ERROR] Container summary failed for {cap_item_type_name} {item_number}: {e}')
+            print(f'  [ERROR] Container summary failed for {cap_type_name} {item_number}: {e}')
             import traceback
             traceback.print_exc()
+            return
 
-    proc.flush()
+    # Flush and add to cumulative context
+    if proc.should_flush_by_time(time_threshold_seconds=10):
+        proc.flush()
+    if state['first_flag'][0]:
+        state['first_flag'][0] = False
+        state['cumulative_summary_list'].append(state['cumulative_summary_list_pre'])
+    state['cumulative_summary_list'].append(
+        '\n' + cap_type_name + ' ' + item_number + ':\n' + working_item['summary_1'] + '\n'
+    )
+    proc.dirty = 1
+    state['count'][0] -= 1
 
 
 def _generate_table_structure_summary(working_item: dict, proc) -> None:
@@ -1252,6 +1477,86 @@ def _generate_table_structure_summary(working_item: dict, proc) -> None:
         working_item["summary_1"] = _fallback_summary()
 
 
+def _process_item_level1(type_name, type_plural, cap_type_name, item_number, working_item, state):
+    """
+    Recursively process one operational item for level 1 summary generation.
+
+    Post-order for containers: recurses into all sub-unit descendants first,
+    then summarises the container using the then-current cumulative context.
+    Leaf items are summarised directly.  Data-table sub-units get structural
+    summaries via _generate_table_structure_summary.
+
+    Sub-unit context isolation: each container's sub-units receive a fresh
+    cumulative_summary_list (reset to TOC only) so their context does not bleed
+    across parent containers.  The parent's list is restored before the
+    container itself is summarised.
+
+    Checks state['count'][0] before each AI-generating call; returns immediately
+    when the processing limit is reached.
+
+    Stop-tag boundary logic fires only for top-level items (those whose
+    _get_parent_key returns None).  Sub-unit context is managed by the
+    save/restore above, so the old parent-key switch logic is not needed.
+    """
+    if state['count'][0] < 1:
+        return
+
+    if has_sub_units(working_item):
+        # Save parent cumulative context; sub-units use their own fresh list
+        saved_cumulative = state['cumulative_summary_list']
+        saved_first_flag = state['first_flag'][0]
+        state['cumulative_summary_list'] = []
+        if state['table_of_contents_cache']:
+            state['cumulative_summary_list'].append(state['table_of_contents_cache'])
+        state['first_flag'][0] = True
+
+        # Recurse into sub-units first (post-order)
+        param_pointer = state['param_pointer']
+        for sub_type_key, sub_type_items in working_item['sub_units'].items():
+            if state['count'][0] < 1:
+                break
+            sub_p = _resolve_param_key(param_pointer, sub_type_key)
+            if sub_p is None or sub_p.get('operational', 0) != 1:
+                continue
+            stn = sub_p['name']
+            stp = sub_p['name_plural']
+            cstn = stn[:1].upper() + stn[1:] if stn else ''
+            for sub_key, sub_item in sub_type_items.items():
+                if state['count'][0] < 1:
+                    break
+                _process_item_level1(stn, stp, cstn, sub_key, sub_item, state)
+
+        # Restore parent context; sub-units' context is discarded
+        state['cumulative_summary_list'] = saved_cumulative
+        state['first_flag'][0] = saved_first_flag
+        if state['count'][0] >= 1:
+            _summarize_container_level1(type_name, type_plural, cap_type_name,
+                                        item_number, working_item, state)
+    elif type_name in state['data_table_type_names']:
+        # Data-table sub-unit: structural summary, not prose summarisation
+        if 'summary_1' not in working_item:
+            print(f'  Generating table summary for {item_number}')
+            _generate_table_structure_summary(working_item, state['proc'])
+            state['proc'].dirty = 1
+    else:
+        _summarize_leaf_level1(type_name, type_plural, cap_type_name,
+                               item_number, working_item, state)
+
+    # Stop-tag boundary logic (top-level items only; sub-unit context handled above)
+    if 'context' not in working_item:
+        raise InputError(f'level_1_summaries: no context in {type_name} {item_number}.')
+    parent_key = _get_parent_key(state['parsed_content'], working_item)
+    if parent_key is None:
+        org_content_pointer = get_org_pointer(state['parsed_content'], working_item)
+        if 'stop_' + type_name in org_content_pointer:
+            if org_content_pointer['stop_' + type_name] == item_number:
+                state['cumulative_summary_list'] = []
+                if state['table_of_contents_cache']:
+                    state['cumulative_summary_list'].append(state['table_of_contents_cache'])
+                state['first_flag'][0] = True
+                top_organization_summaries(state['proc'], 1)
+
+
 def level_1_summaries(proc, count=30, checkpoint_threshold=30) -> bool:
     """
     Generate level 1 summaries for operational items in the document.
@@ -1272,15 +1577,13 @@ def level_1_summaries(proc, count=30, checkpoint_threshold=30) -> bool:
     5. Triggers organizational summary generation at boundaries
     """
 
-    client = proc.clients.get('level1_with_references', proc.client) # AI client for level 1 summaries with references
-    parsed_content = proc.parsed_content # The document content being processed
-    out_path = proc.out_path # Output file path for saving updates
-    logfile = proc.logfile # Log file for tracking operations
-    config = proc.config # Configuration for fallback model support
+    client = proc.clients.get('level1_with_references', proc.client)
+    parsed_content = proc.parsed_content
+    out_path = proc.out_path
+    logfile = proc.logfile
+    config = proc.config
 
-    # Create (if needed) the initial summaries (summary_1)
-    update_json_content = 0
-    if ('document_information' not in parsed_content.keys() or 
+    if ('document_information' not in parsed_content.keys() or
         'parameters' not in parsed_content['document_information'].keys() or
         'content' not in parsed_content.keys()):
         raise InputError('level_1_summaries: invalid parsed_content structure.')
@@ -1288,315 +1591,439 @@ def level_1_summaries(proc, count=30, checkpoint_threshold=30) -> bool:
 
     param_pointer = parsed_content['document_information']['parameters']
     content_pointer = parsed_content['content']
-    first_flag = True # True if addition to the cache_summary_list will be the first substantive addition.
-    cumulative_summary_list = []
-    current_parent_key = None  # Track current parent for sub-unit boundary detection
-    cumulative_summary_list_pre = '\nFor the context of this request, consider these summarizations of earlier portions of the document:\n' # This is a running summary of what has gone before, and is reset at each organizational level.
+    cumulative_summary_list_pre = '\nFor the context of this request, consider these summarizations of earlier portions of the document:\n'
     table_of_contents_cache = ''
-    if not '' == proc.table_of_contents: # Always start with the table of contents, if available.
+    if not '' == proc.table_of_contents:
         table_of_contents_cache = 'Here is a table of contents for a document that is relevant to this request:\n\n' + proc.table_of_contents + '\n'
+    cumulative_summary_list = []
+    if table_of_contents_cache:
+        cumulative_summary_list.append(table_of_contents_cache)
 
-    if not '' == table_of_contents_cache:
-        cumulative_summary_list.append(table_of_contents_cache) # Add table of contents if there is one.
-    # Count total items and items needing processing for progress reporting.
-    # Containers (has_sub_units) count toward total but are handled by container_summaries()
-    # after this loop, not here.
+    # Count items needing summary_1 (leaves with text + all containers)
     total_items = 0
     items_needing_summary = 0
-    items_processed = 0
     for _, _, _, _, item in iter_operational_items(parsed_content):
         total_items += 1
-        if has_sub_units(item):
-            continue
-        if 'summary_1' not in item.keys() and item.get('text', ''):
+        if 'summary_1' not in item and (item.get('text', '') or has_sub_units(item)):
             items_needing_summary += 1
-
     print(f'  Found {total_items} total operational items, {items_needing_summary} need summary_1')
 
-    # Build set of data-table type names (data_table: 1 flag in parameters).
-    _params = parsed_content['document_information']['parameters']
-    data_table_type_names = {p['name'] for p in _params.values()
+    # Build set of data-table type names (data_table: 1 flag in parameters)
+    data_table_type_names = {p['name'] for p in param_pointer.values()
                              if p.get('data_table') and p.get('is_sub_unit')}
 
-    for item_type_name, item_type_name_plural, cap_item_type_name, item_number, working_item in iter_operational_items(parsed_content):
-        if has_sub_units(working_item):  # handled by container_summaries() after this loop
+    state = {
+        'parsed_content':              parsed_content,
+        'param_pointer':               param_pointer,
+        'content_pointer':             content_pointer,
+        'client':                      client,
+        'logfile':                     logfile,
+        'config':                      config,
+        'proc':                        proc,
+        'type_name_list':              proc.type_name_list,
+        'data_table_type_names':       data_table_type_names,
+        'cumulative_summary_list':     cumulative_summary_list,
+        'cumulative_summary_list_pre': cumulative_summary_list_pre,
+        'table_of_contents_cache':     table_of_contents_cache,
+        'first_flag':                  [True],
+        'items_processed':             [0],
+        'items_needing_summary':       items_needing_summary,
+        'count':                       [count],
+        'checkpoint_threshold':        checkpoint_threshold,
+    }
+
+    for item_type in param_pointer.keys():
+        p = param_pointer[item_type]
+        if p.get('is_sub_unit', False) or p.get('operational') != 1:
             continue
-        if item_type_name in data_table_type_names:  # data table sub-units get a structural AI summary, not prose summarization.
-            if 'summary_1' not in working_item:
-                print(f'  Generating table summary for {item_number}')
-                _generate_table_structure_summary(working_item, proc)
-                proc.dirty = 1
-            continue
-        if '' == working_item['text']:
-            working_item['summary_1'] = cap_item_type_name + ' is blank.'
-            working_item['defined_terms'] = []
-            working_item['need_ref'] = []
-        else:
-            if 'summary_1' in working_item.keys(): # Existing summary.
-                print(f'  [{items_processed+1}/{items_needing_summary}] Existing: {item_number}')
-                if first_flag:
-                    first_flag = False
-                    cumulative_summary_list.append(cumulative_summary_list_pre)
+        item_type_name = p['name']
+        item_type_name_plural = p['name_plural']
+        if item_type_name_plural not in content_pointer:
+            raise InputError(f'level_1_summaries: {item_type_name_plural} not present.')
+        cap_item_type_name = item_type_name[:1].upper() + item_type_name[1:] if item_type_name else ''
+        for item_number, working_item in content_pointer[item_type_name_plural].items():
+            if state['count'][0] < 1:
+                break
+            _process_item_level1(item_type_name, item_type_name_plural, cap_item_type_name,
+                                  item_number, working_item, state)
+        if state['count'][0] < 1:
+            break
 
-                # Defensive: Handle case where summary_1 is incorrectly stored as a list
-                # (can happen if AI returned list instead of string in previous run)
-                summary_text = working_item['summary_1']
-                if isinstance(summary_text, list):
-                    print(f'    WARNING: summary_1 is a list ({len(summary_text)} items), converting to string')
-                    summary_text = ' '.join(summary_text)
-                    # Fix the stored value so future runs don't need this
-                    working_item['summary_1'] = summary_text
-                    proc.dirty = 1
-
-                cumulative_summary_list.append('\n' + cap_item_type_name + ' ' + item_number + ':\n' + summary_text + '\n')
-            else:
-                items_processed += 1
-                print(f'\n  [{items_processed}/{items_needing_summary}] Processing: {cap_item_type_name} {item_number}')
-                
-                # Build base prompt
-                base_prompt = 'Please provide two things in your response: (i) a short (no more than three sentences) summary of this ' + item_type_name + ' from a longer document, and '
-                base_prompt += '(ii) a list of references that are explicitly cited or mentioned in the text that would be needed to make a better summary.  '
-                base_prompt += 'The summary should not re-iterate which ' + item_type_name + ' is being summarized, '
-                base_prompt += 'that will be attached to the summary separately.\n\n'
-                base_prompt += 'Please return these two things in JSON format, following the form of this example, with no preamble and no '
-                base_prompt += 'response other than in this JSON format:\n'
-                base_prompt += get_summary_JSON_format(proc.type_name_list) + '\n\n'
-                base_prompt += 'Only include references that are explicitly cited or mentioned in the text being summarized. Use these types:\n'
-                for list_item_type_name in proc.type_name_list:
-                    cap_type_name = list_item_type_name[0].upper() + list_item_type_name[1:]
-                    base_prompt += ' "' + cap_type_name + '" - for ' + list_item_type_name + 's mentioned in the text (use the identifier that appears in the table of contents),\n'
-                base_prompt += ' "External" - for references to other documents,\n'
-                base_prompt += ' "Need_Definition" - for terms needing definitions (return the term EXACTLY as it appears in the text, preserving any HTML/XML font markup like <sub>, <sup>, <i>, <b>, etc.).\n\n'
-                reference_guidance = get_reference_instructions(parsed_content)
-                if reference_guidance:
-                    base_prompt += 'Reference formatting guidance:\n' + reference_guidance + '\n\n'
-                base_prompt += 'If the text cites a sub-unit that doesn\'t appear in the table of contents (e.g., "' + item_type_name + ' 12(b)"), report the closest parent that does appear (e.g., "12").\n\n'
-                
-                # UNIFIED CHUNKING PATH (handles both chunked and non-chunked)
-                text = working_item['text']
-                breakpoints = working_item.get('breakpoints', [])
-
-                # Build metadata suffix for sections in duplicate sets
-                metadata_suffix = build_metadata_suffix(item_number, working_item, content_pointer, item_type_name_plural)
-
-                # chunk_text will yield single chunk if text is short or no breakpoints
-                chunks = list(chunk_text(text, breakpoints, preferred_length=15000))
-                total_chunks = len(chunks)
-
-                chunk_summaries = []
-                all_references = []
-
-                # Process each chunk (or single chunk for non-chunked case)
-                for i, chunk in enumerate(chunks):
-                    # Augment this chunk with metadata (for _dup sections)
-                    augmented_chunk = augment_chunk_with_metadata(chunk, metadata_suffix)
-
-                    # Helper handles single vs multi-chunk prompt differences
-                    chunk_prompt = create_chunk_summary_prompt(
-                        base_prompt,
-                        augmented_chunk,  # Use augmented chunk instead of plain chunk
-                        i + 1,
-                        total_chunks,
-                        item_type_name,
-                        item_number,
-                        chunk_summaries,  # Empty on first iteration
-                        unit_title=working_item.get('unit_title', '')
-                    )
-                    
-                    print(f'    Chunk {i+1}/{total_chunks} of {cap_item_type_name} {item_number}...')
-                    
-                    # Use SAME cumulative_summary_list for all chunks
-                    # (preserves caching - doesn't change during this item)
-                    try:
-                        # Level 1 summaries must have 'summary' key
-                        # 'references' may be empty but 'summary' is always required
-                        result = query_json(client, cumulative_summary_list, chunk_prompt, logfile, expected_keys=['summary'], config=config, task_name='stage3.summary.level1_with_references')
-                    except Exception as e:
-                        print(f'    ERROR: Failed to query AI for chunk {i+1} of {cap_item_type_name} {item_number}: {e}')
-                        import traceback
-                        traceback.print_exc()
-                        raise ModelError(f'Failed to get response for chunk {i+1} of {cap_item_type_name} {item_number}: {e}')
-                    
-                    print(f'    Chunk {i+1} complete')
-                    
-                    if not result:
-                        raise ModelError('Failed to get response.\n')
-                    
-                    if 'summary' in result.keys():
-                        # Defensive: Ensure summary is a string, not a list
-                        # (can happen if AI returns malformed JSON)
-                        summary_text = result['summary']
-                        if isinstance(summary_text, list):
-                            print(f'    WARNING: Chunk {i+1} summary is a list ({len(summary_text)} items), converting to string')
-                            summary_text = ' '.join(str(item) for item in summary_text)
-                        elif not isinstance(summary_text, str):
-                            print(f'    WARNING: Chunk {i+1} summary is not a string (type: {type(summary_text)}), converting to string')
-                            summary_text = str(summary_text)
-                        chunk_summaries.append(summary_text)
-                    if 'references' in result.keys():
-                        all_references.extend(result['references'])
-                
-                # Synthesize final summary (no-op if only one chunk)
-                try:
-                    final_summary = synthesize_final_summary(
-                        chunk_summaries,
-                        item_type_name,
-                        item_number,
-                        client,
-                        logfile,
-                        config
-                    )
-                    # Defensive: Ensure final_summary is a string, not a list
-                    # (can happen if synthesize_final_summary returns a list or if chunk_summaries contained lists)
-                    if isinstance(final_summary, list):
-                        print(f'    WARNING: Final summary is a list ({len(final_summary)} items), converting to string')
-                        final_summary = ' '.join(str(item) for item in final_summary)
-                    elif not isinstance(final_summary, str):
-                        print(f'    WARNING: Final summary is not a string (type: {type(final_summary)}), converting to string')
-                        final_summary = str(final_summary)
-                    
-                    if not final_summary:
-                        print(f'    WARNING: Empty summary for {cap_item_type_name} {item_number}')
-                        final_summary = f"{cap_item_type_name} {item_number} summary unavailable"
-                    working_item['summary_1'] = final_summary
-                    print(f'    [OK] {cap_item_type_name} {item_number} summary_1 complete ({len(final_summary)} chars)')
-                except Exception as e:
-                    print(f'    ERROR: Failed to synthesize summary for {cap_item_type_name} {item_number}: {e}')
-                    import traceback
-                    traceback.print_exc()
-                    # Use a fallback summary to prevent complete failure
-                    working_item['summary_1'] = f"{cap_item_type_name} {item_number} summary generation failed: {str(e)}"
-                    proc.dirty = 1
-                
-                # CRITICAL: Ensure summary_1 is saved immediately to prevent data loss
-                # Wrap subsequent operations in try/except to ensure flush happens even if code fails
-                try:
-                    # Deduplicate references
-                    working_item['need_ref'] = deduplicate_references(all_references)
-                    
-                    # Update progress after each item for UI visibility
-                    operational_counts, organizational_counts = count_stage_3_progress(parsed_content)
-                    update_stage_3_progress(parsed_content, operational_counts, organizational_counts)
-                    proc.dirty = 1
-                    
-                    # CRITICAL: Flush immediately if it's been more than 10 seconds since last flush
-                    # This prevents data loss if an exception occurs before the regular flush
-                    if proc.should_flush_by_time(time_threshold_seconds=10):
-                        proc.flush()
-                        print(f'  [Immediate flush] Saved {cap_item_type_name} {item_number} summary_1 to prevent data loss')
-                    
-                    # Periodic checkpoint: save progress every checkpoint_threshold items
-                    if items_processed % checkpoint_threshold == 0:
-                        proc.flush()
-                        print(f'  [Checkpoint] Progress saved: {operational_counts["summary_1"]}/{operational_counts["total"]} operational items with summary_1')
-                    else:
-                        # Flush more frequently for UI updates (every 5 items OR if 30+ seconds have passed)
-                        should_flush = False
-                        if items_processed % 5 == 0:
-                            should_flush = True
-                        elif proc.should_flush_by_time(time_threshold_seconds=30):
-                            should_flush = True
-                            print(f'  [Time-based flush] Flushing after {int(time_module.time() - proc.last_flush_time)} seconds')
-                        
-                        if should_flush:
-                            proc.flush()
-                except Exception as e:
-                    # If anything fails after setting summary_1, ensure we flush before re-raising
-                    # This prevents data loss if an exception occurs in progress updates or other operations
-                    print(f'  [ERROR] Exception after setting summary_1 for {cap_item_type_name} {item_number}: {e}')
-                    print(f'  [SAFETY] Flushing to save {cap_item_type_name} {item_number} summary_1 before re-raising exception...')
-                    try:
-                        proc.flush()
-                    except Exception as flush_error:
-                        print(f'  [CRITICAL] Failed to flush after exception: {flush_error}')
-                    raise  # Re-raise the original exception
-                
-                # NOW add to cumulative_summary_list for next items (after all chunks done)
-                # Use working_item['summary_1'] instead of final_summary variable to ensure we always have a string
-                # (working_item['summary_1'] is always set to a string, either from final_summary or a fallback)
-                summary_for_context = working_item.get('summary_1', f"{cap_item_type_name} {item_number} summary")
-                
-                # Defensive: Ensure summary_for_context is a string (should always be, but be safe)
-                if isinstance(summary_for_context, list):
-                    print(f'    WARNING: summary_1 is a list at append time ({len(summary_for_context)} items), converting to string')
-                    summary_for_context = ' '.join(str(item) for item in summary_for_context)
-                    # Fix the stored value so future runs don't need this
-                    working_item['summary_1'] = summary_for_context
-                    proc.dirty = 1
-                elif not isinstance(summary_for_context, str):
-                    print(f'    WARNING: summary_1 is not a string at append time (type: {type(summary_for_context)}), converting to string')
-                    summary_for_context = str(summary_for_context)
-                    # Fix the stored value so future runs don't need this
-                    working_item['summary_1'] = summary_for_context
-                    proc.dirty = 1
-                
-                if first_flag:
-                    first_flag = False
-                    cumulative_summary_list.append(cumulative_summary_list_pre)
-                cumulative_summary_list.append('\n' + cap_item_type_name + ' ' + item_number + ':\n' + summary_for_context + '\n')
-                
-                proc.dirty = 1
-                count = count - 1
-                if count < 1:
-                    print(f'\n  Reached processing limit. More processing needed.')
-                    break
-        # Cut off cumulative summary when crossing a boundary.
-        if not 'context' in working_item.keys():
-            raise InputError('level_1_summaries: invalid parsed_content structure, no context in working_item.')
-            exit(1)
-
-        parent_key = _get_parent_key(parsed_content, working_item)
-        if parent_key is not None:
-            # Sub-unit path: reset cumulative context when switching parent containers
-            if current_parent_key is not None and parent_key != current_parent_key:
-                cumulative_summary_list = []
-                if not '' == table_of_contents_cache:
-                    cumulative_summary_list.append(table_of_contents_cache)
-                first_flag = True
-            current_parent_key = parent_key
-        else:
-            # Regular item path: existing stop_tag logic
-            current_parent_key = None
-            org_content_pointer = get_org_pointer(parsed_content, working_item)
-            if 'stop_' + item_type_name in org_content_pointer.keys():
-                stop_tag = org_content_pointer['stop_' + item_type_name]
-                if stop_tag == item_number:
-                    cumulative_summary_list = []
-                    if not '' == table_of_contents_cache:
-                        cumulative_summary_list.append(table_of_contents_cache)
-                    first_flag = True
-                    top_organization_summaries(proc, 1)
     proc.flush()
-    # Check if we processed all items that needed processing
-    # If count was exhausted (count < 1), we hit the limit and need more processing
-    if count < 1:
+    if state['count'][0] < 1:
         print('More processing needed.  Please run again.\n')
         return False
-    # Otherwise, we finished all items that needed processing
     return True
+
+def _summarize_leaf_level2(type_name, type_plural, cap_type_name, item_number, working_item, state):
+    """
+    Generate a level 2 summary for a single leaf operational item.
+    Extracted from the level_2_summaries main loop.
+    """
+    parsed_content = state['parsed_content']
+    client = state['client']
+    logfile = state['logfile']
+    config = state['config']
+    proc = state['proc']
+    checkpoint_threshold = state['checkpoint_threshold']
+    table_of_contents_cache = state['table_of_contents_cache']
+
+    # Idempotency: skip if already done
+    if 'summary_2' in working_item:
+        summary_2_text = working_item['summary_2']
+        if isinstance(summary_2_text, list):
+            print(f'    WARNING: summary_2 is a list ({len(summary_2_text)} items), converting to string')
+            summary_2_text = ' '.join(summary_2_text)
+            working_item['summary_2'] = summary_2_text
+            proc.dirty = 1
+        return
+
+    # Prerequisite
+    if 'summary_1' not in working_item:
+        raise InputError(f'level_2_summaries: summary_1 missing for {type_name} {item_number}')
+        exit(1)
+
+    # Blank item
+    if '' == working_item.get('text', ''):
+        working_item['summary_2'] = cap_type_name + ' is blank.'
+        proc.dirty = 1
+        return
+
+    state['items_processed'][0] += 1
+    print(f'\n  [{state["items_processed"][0]}/{state["items_needing_summary"]}] Processing: {cap_type_name} {item_number}')
+
+    context_string, conflicts = build_level_2_context(parsed_content, working_item, type_name, item_number)
+    if conflicts:
+        document_issues_logfile = get_document_issues_logfile(proc.out_path)
+        for c in conflicts:
+            log_document_issue(
+                document_issues_logfile,
+                'conflicting_direct_definitions',
+                item_type_name=type_name,
+                item_number=item_number,
+                issue_description=f"Multiple direct definitions in scope for term '{c.get('term','')}'",
+                details=c
+            )
+
+    text = working_item['text']
+    breakpoints = working_item.get('breakpoints', [])
+    metadata_suffix = build_metadata_suffix(item_number, working_item, state['content_pointer'], type_plural)
+    try:
+        chunks = list(chunk_text(text, breakpoints, preferred_length=15000))
+        total_chunks = len(chunks)
+    except Exception as e:
+        raise InputError(f'level_2_summaries: chunking failed for {type_name} {item_number}: {e}')
+        exit(1)
+
+    base_prompt = create_level_2_base_prompt(proc, type_name, item_number, total_chunks)
+    cache_prompt_list = prepare_context_for_caching(context_string, table_of_contents_cache)
+    chunk_summaries = []
+
+    for i, chunk in enumerate(chunks):
+        augmented_chunk = augment_chunk_with_metadata(chunk, metadata_suffix)
+        chunk_prompt = create_chunk_summary_prompt(
+            base_prompt, augmented_chunk, i + 1, total_chunks,
+            type_name, item_number, chunk_summaries,
+            unit_title=working_item.get('unit_title', '')
+        )
+        print(f'    Chunk {i+1}/{total_chunks} of {cap_type_name} {item_number}...')
+        try:
+            result = query_text_with_retry(client, cache_prompt_list, chunk_prompt, logfile,
+                                           max_tokens=0, max_retries=3, config=config,
+                                           task_name='stage3.summary.level2')
+        except ModelError as e:
+            raise ModelError(f'level_2_summaries: Failed to get response for {type_name} {item_number}, chunk {i+1} after retries: {e}')
+            exit(1)
+        except Exception as e:
+            raise ModelError(f'level_2_summaries: Unexpected error for {type_name} {item_number}, chunk {i+1}: {e}')
+            exit(1)
+        summary_text = clean_summary_text(result)
+        if not summary_text:
+            from utils.api_cache import remove_cached_response
+            full_cache = ''.join(cache_prompt_list)
+            model_name = getattr(client, 'model', 'unknown')
+            remove_cached_response(full_cache, chunk_prompt, model_name, 0)
+            print(f'    [Cache cleanup] Removed empty summary cache entry for {type_name} {item_number}, chunk {i+1}')
+            raise ModelError(f'level_2_summaries: Empty summary response for {type_name} {item_number}, chunk {i+1}')
+            exit(1)
+        chunk_summaries.append(summary_text)
+        print(f'    Chunk {i+1} complete ({len(chunk_summaries[-1])} chars)')
+
+    # Synthesize final summary
+    if total_chunks == 1:
+        final_summary = chunk_summaries[0]
+    else:
+        try:
+            max_paragraphs = 5 + max(0, total_chunks - 1)
+            synthesis_prompt = f"""Please create a final, cohesive summary of {type_name} {item_number}
+by synthesizing these summaries of its parts. The summary should be up to {max_paragraphs} paragraphs and should allow
+a legal practitioner to understand the rights, restrictions, and obligations set forth in this portion.
+The summary should not re-iterate which {type_name} is being summarized, that will be attached to the summary separately.
+**IMPORTANT: The final summary must not be longer than the combined length of the part summaries being synthesized.**
+
+"""
+            for idx, summary in enumerate(chunk_summaries, 1):
+                synthesis_prompt += f"Part {idx}: {summary}\n\n"
+            synthesis_prompt += """
+Create a unified summary that captures the overall content without referencing part numbers.
+Return only the summary text, no preamble."""
+            result = query_text_with_retry(client, [], synthesis_prompt, logfile,
+                                           max_tokens=0, max_retries=3, config=config,
+                                           task_name='stage3.summary.level2.synthesis')
+            final_summary = clean_summary_text(result)
+        except ModelError as e:
+            raise ModelError(f'level_2_summaries: synthesis failed for {type_name} {item_number} after retries: {e}')
+            exit(1)
+        except Exception as e:
+            raise ModelError(f'level_2_summaries: unexpected synthesis error for {type_name} {item_number}: {e}')
+            exit(1)
+
+    if not final_summary:
+        from utils.api_cache import remove_cached_response
+        model_name = getattr(client, 'model', 'unknown')
+        remove_cached_response('', synthesis_prompt, model_name, 0)
+        print(f'    [Cache cleanup] Removed empty synthesis cache entry for {type_name} {item_number}')
+        raise ModelError(f'level_2_summaries: Final summary is empty for {type_name} {item_number}')
+        exit(1)
+
+    try:
+        working_item['summary_2'] = final_summary
+        print(f'    [OK] {cap_type_name} {item_number} summary_2 complete ({len(final_summary)} chars)')
+        operational_counts, organizational_counts = count_stage_3_progress(parsed_content)
+        update_stage_3_progress(parsed_content, operational_counts, organizational_counts)
+        proc.dirty = 1
+        if proc.should_flush_by_time(time_threshold_seconds=10):
+            proc.flush()
+            print(f'  [Immediate flush] Saved {cap_type_name} {item_number} summary_2 to prevent data loss')
+        state['count'][0] -= 1
+        if state['items_processed'][0] % checkpoint_threshold == 0:
+            proc.flush()
+            print(f'  [Checkpoint] Progress saved: {operational_counts["summary_2"]}/{operational_counts["total"]} operational items with summary_2')
+        else:
+            should_flush = False
+            if state['items_processed'][0] % 5 == 0:
+                should_flush = True
+            elif proc.should_flush_by_time(time_threshold_seconds=30):
+                should_flush = True
+                print(f'  [Time-based flush] Flushing after {int(time_module.time() - proc.last_flush_time)} seconds')
+            if should_flush:
+                proc.flush()
+    except Exception as e:
+        print(f'  [ERROR] Exception after setting summary_2 for {cap_type_name} {item_number}: {e}')
+        print(f'  [SAFETY] Flushing to save {cap_type_name} {item_number} summary_2 before re-raising exception...')
+        try:
+            proc.flush()
+        except Exception as flush_error:
+            print(f'  [CRITICAL] Failed to flush after exception: {flush_error}')
+        raise
+
+
+def _summarize_container_level2(type_name, type_plural, cap_type_name, item_number, working_item, state):
+    """
+    Generate a level 2 summary for a container item.
+    Called after all sub-units have been recursively processed.
+
+    If the container has own text: uses build_level_2_context + level_2 prompt style
+    (single chunk, same as leaf items but combined with sub-unit summary_2 block).
+    If the container is a pure aggregator: synthesises from sub-unit summary_2 values
+    with TOC context.
+    """
+    # Idempotency
+    if 'summary_2' in working_item and working_item['summary_2']:
+        summary_2_text = working_item['summary_2']
+        if isinstance(summary_2_text, list):
+            summary_2_text = ' '.join(str(x) for x in summary_2_text)
+            working_item['summary_2'] = summary_2_text
+            state['proc'].dirty = 1
+        return
+
+    # Prerequisite
+    if 'summary_1' not in working_item:
+        raise InputError(f'level_2_summaries: summary_1 missing for container {type_name} {item_number}')
+        exit(1)
+
+    # Collect sub-unit summary_2 values.
+    # Data-table sub-units only ever have summary_1 (level-2 processing is skipped for them);
+    # fall back to summary_1 for those types so the container is not blocked.
+    sub_summaries = []
+    all_present = True
+    data_table_type_names = state['data_table_type_names']
+    for sub_type_key, sub_type_items in working_item['sub_units'].items():
+        sub_p = _resolve_param_key(state['param_pointer'], sub_type_key)
+        is_data_table = (sub_p['name'] in data_table_type_names) if sub_p else False
+        for sub_key, sub_item in sub_type_items.items():
+            if 'summary_2' in sub_item and sub_item['summary_2']:
+                sub_summaries.append(f'{sub_key}: {sub_item["summary_2"]}')
+            elif is_data_table and 'summary_1' in sub_item and sub_item['summary_1']:
+                # Data-table sub-units receive a structural description (what the table contains,
+                # its columns, purpose) as summary_1 via _generate_table_structure_summary.
+                # They have no summary_2 — the structural description is the complete summary;
+                # there is no prose content to analyse at a deeper level.  Use summary_1 here.
+                sub_summaries.append(f'{sub_key}: {sub_item["summary_1"]}')
+            else:
+                all_present = False
+                break
+        if not all_present:
+            break
+
+    if not all_present or not sub_summaries:
+        print(f'  [WARNING] Container {cap_type_name} {item_number}: missing sub-unit summary_2, skipping')
+        return
+
+    parsed_content = state['parsed_content']
+    client = state['client']
+    logfile = state['logfile']
+    config = state['config']
+    proc = state['proc']
+    table_of_contents_cache = state['table_of_contents_cache']
+    container_text = working_item.get('text', '').strip()
+
+    state['items_processed'][0] += 1
+    print(f'\n  [{state["items_processed"][0]}/{state["items_needing_summary"]}] Processing container: {cap_type_name} {item_number}')
+
+    if container_text:
+        # Container has own text: level_2 prompt style with definition context, single chunk
+        context_string, conflicts = build_level_2_context(parsed_content, working_item, type_name, item_number)
+        if conflicts:
+            document_issues_logfile = get_document_issues_logfile(proc.out_path)
+            for c in conflicts:
+                log_document_issue(
+                    document_issues_logfile,
+                    'conflicting_direct_definitions',
+                    item_type_name=type_name,
+                    item_number=item_number,
+                    issue_description=f"Multiple direct definitions in scope for term '{c.get('term','')}'",
+                    details=c
+                )
+        cache_prompt_list = prepare_context_for_caching(context_string, table_of_contents_cache)
+        base_prompt = create_level_2_base_prompt(proc, type_name, item_number, 1)
+        sub_block = '\n[Subsidiary unit summaries:]\n' + '\n'.join(sub_summaries)
+        combined_text = container_text + '\n' + sub_block
+        chunk_prompt = create_chunk_summary_prompt(
+            base_prompt, combined_text, 1, 1, type_name, item_number, [],
+            unit_title=working_item.get('unit_title', '')
+        )
+        try:
+            result = query_text_with_retry(client, cache_prompt_list, chunk_prompt, logfile,
+                                           max_tokens=0, max_retries=3, config=config,
+                                           task_name='stage3.summary.level2')
+        except Exception as e:
+            raise ModelError(f'Container level_2 summary failed for {cap_type_name} {item_number}: {e}')
+        final_summary = clean_summary_text(result)
+        if not final_summary:
+            raise ModelError(f'Empty level_2 container summary for {cap_type_name} {item_number}')
+    else:
+        # Pure aggregator: synthesise from sub-unit summary_2 with TOC context
+        cache_prompt_list = prepare_context_for_caching('', table_of_contents_cache)
+        prompt = (
+            f'Please provide a concise summary of {cap_type_name} {item_number} '
+            f'based on the following summaries of its sub-units. '
+            f'The summary should allow a legal practitioner to understand the rights, '
+            f'restrictions, and obligations set forth in this portion. '
+            f'Do not re-iterate which {type_name} is being summarized.\n\n'
+        )
+        for s in sub_summaries:
+            prompt += s + '\n\n'
+        prompt += 'Return only the summary text, no preamble.'
+        try:
+            result = query_text_with_retry(client, cache_prompt_list, prompt, logfile,
+                                           max_tokens=0, max_retries=3, config=config,
+                                           task_name='stage3.summary.container_2')
+        except Exception as e:
+            raise ModelError(f'Container level_2 aggregation failed for {cap_type_name} {item_number}: {e}')
+        final_summary = clean_summary_text(result)
+        if not final_summary:
+            print(f'  [WARNING] Empty container level_2 summary for {cap_type_name} {item_number}')
+            return
+
+    working_item['summary_2'] = final_summary
+    print(f'  [OK] Container {cap_type_name} {item_number} summary_2 ({len(final_summary)} chars)')
+    proc.dirty = 1
+    if proc.should_flush_by_time(time_threshold_seconds=10):
+        proc.flush()
+    state['count'][0] -= 1
+
+
+def _process_item_level2(type_name, type_plural, cap_type_name, item_number, working_item, state):
+    """
+    Recursively process one operational item for level 2 summary generation.
+
+    Post-order for containers: recurses into all sub-unit descendants first,
+    fires top_organization_summaries after sub-units are done (mirrors the
+    parent-switch org-summary trigger from the old flat loop), then summarises
+    the container itself.
+
+    Data-table sub-units are skipped (they have only summary_1, not summary_2).
+
+    Stop-tag boundary logic fires only for top-level items.
+    """
+    if state['count'][0] < 1:
+        return
+
+    if has_sub_units(working_item):
+        # Recurse into sub-units first
+        param_pointer = state['param_pointer']
+        for sub_type_key, sub_type_items in working_item['sub_units'].items():
+            if state['count'][0] < 1:
+                break
+            sub_p = _resolve_param_key(param_pointer, sub_type_key)
+            if sub_p is None or sub_p.get('operational', 0) != 1:
+                continue
+            stn = sub_p['name']
+            stp = sub_p['name_plural']
+            cstn = stn[:1].upper() + stn[1:] if stn else ''
+            for sub_key, sub_item in sub_type_items.items():
+                if state['count'][0] < 1:
+                    break
+                _process_item_level2(stn, stp, cstn, sub_key, sub_item, state)
+
+        # Trigger org summaries after all sub-units are done (mirrors parent-switch logic)
+        top_organization_summaries(state['proc'], 2)
+
+        if state['count'][0] >= 1:
+            _summarize_container_level2(type_name, type_plural, cap_type_name,
+                                        item_number, working_item, state)
+
+    elif type_name in state['data_table_type_names']:
+        pass  # Data-table sub-units have only summary_1; no level_2 processing
+
+    else:
+        _summarize_leaf_level2(type_name, type_plural, cap_type_name,
+                               item_number, working_item, state)
+
+    # Stop-tag boundary logic (top-level items only)
+    if 'context' not in working_item:
+        raise InputError(f'level_2_summaries: no context in {type_name} {item_number}.')
+        exit(1)
+    parent_key = _get_parent_key(state['parsed_content'], working_item)
+    if parent_key is None:
+        org_content_pointer = get_org_pointer(state['parsed_content'], working_item)
+        if 'stop_' + type_name in org_content_pointer:
+            if org_content_pointer['stop_' + type_name] == item_number:
+                top_organization_summaries(state['proc'], 2)
+
 
 def level_2_summaries(proc, count=30, checkpoint_threshold=30) -> bool:
     """
     Generate level 2 summaries for operational items in the document.
-    
-    This function creates detailed, context-aware summaries using:
+
+    Creates detailed, context-aware summaries using:
     - Scope-aware definition collection
     - Referenced section context
     - Text chunking for long documents
     - Enhanced summarization (5+ paragraphs)
-    
+
     Args:
         proc: SummaryProcessor object
         count (int): Maximum number of items to process in this run
     """
-    client = proc.clients.get('level2', proc.client) # AI client for level 2 summaries
-    parsed_content = proc.parsed_content # The document content being processed
-    out_path = proc.out_path # Output file path for saving updates
-    logfile = proc.logfile # Log file for tracking operations
-    config = proc.config # Configuration for fallback model support
+    client = proc.clients.get('level2', proc.client)
+    parsed_content = proc.parsed_content
+    out_path = proc.out_path
+    logfile = proc.logfile
+    config = proc.config
 
-    # Setup and Validation
-    if ('document_information' not in parsed_content.keys() or 
+    if ('document_information' not in parsed_content.keys() or
         'parameters' not in parsed_content['document_information'].keys() or
         'content' not in parsed_content.keys()):
         raise InputError('level_2_summaries: invalid parsed_content structure.')
@@ -1604,267 +2031,62 @@ def level_2_summaries(proc, count=30, checkpoint_threshold=30) -> bool:
 
     param_pointer = parsed_content['document_information']['parameters']
     content_pointer = parsed_content['content']
-
-    # Get table of contents for caching
     table_of_contents_cache = ''
     if proc.table_of_contents:
         table_of_contents_cache = 'Here is a table of contents for a document that is relevant to this request:\n\n' + proc.table_of_contents + '\n'
 
-    current_parent_key = None  # Track current parent for sub-unit boundary detection
-
-    # Count total items and items needing processing for progress reporting.
-    # Containers (has_sub_units) count toward total but are handled by container_summaries()
-    # after this loop, not here.
+    # Count items needing summary_2 (leaves with text + all containers)
     total_items = 0
     items_needing_summary = 0
-    items_processed = 0
     for _, _, _, _, item in iter_operational_items(parsed_content):
         total_items += 1
         if has_sub_units(item):
-            continue
-        if 'summary_2' not in item.keys() and item.get('text', ''):
+            if 'summary_2' not in item:
+                items_needing_summary += 1
+        elif 'summary_2' not in item and item.get('text', ''):
             items_needing_summary += 1
-
     print(f'  Found {total_items} total operational items, {items_needing_summary} need summary_2')
 
-    # Iterate through operational items
-    for item_type_name, item_type_name_plural, cap_item_type_name, item_number, working_item in iter_operational_items(parsed_content):
-        if has_sub_units(working_item):  # handled by container_summaries() after this loop
+    data_table_type_names = {p['name'] for p in param_pointer.values()
+                             if p.get('data_table') and p.get('is_sub_unit')}
+
+    state = {
+        'parsed_content':        parsed_content,
+        'param_pointer':         param_pointer,
+        'content_pointer':       content_pointer,
+        'client':                client,
+        'logfile':               logfile,
+        'config':                config,
+        'proc':                  proc,
+        'data_table_type_names': data_table_type_names,
+        'table_of_contents_cache': table_of_contents_cache,
+        'items_processed':       [0],
+        'items_needing_summary': items_needing_summary,
+        'count':                 [count],
+        'checkpoint_threshold':  checkpoint_threshold,
+    }
+
+    for item_type in param_pointer.keys():
+        p = param_pointer[item_type]
+        if p.get('is_sub_unit', False) or p.get('operational') != 1:
             continue
-        # Skip items that already have summary_2
-        if 'summary_2' in working_item.keys():
-            # Defensive: Handle case where summary_2 is incorrectly stored as a list
-            # (can happen if AI returned list instead of string in previous run)
-            summary_2_text = working_item['summary_2']
-            if isinstance(summary_2_text, list):
-                print(f'    WARNING: summary_2 is a list ({len(summary_2_text)} items), converting to string')
-                summary_2_text = ' '.join(summary_2_text)
-                # Fix the stored value so future runs don't need this
-                working_item['summary_2'] = summary_2_text
-                proc.dirty = 1
+        item_type_name = p['name']
+        item_type_name_plural = p['name_plural']
+        if item_type_name_plural not in content_pointer:
             continue
-        
-        # Skip items without summary_1 (prerequisite check)
-        if 'summary_1' not in working_item.keys():
-            raise InputError(f'level_2_summaries: summary_1 missing for {item_type_name} {item_number}')
-            exit(1)
-        
-        # Check prerequisites
-        if '' == working_item.get('text', ''):
-            working_item['summary_2'] = cap_item_type_name + ' is blank.'
-            proc.dirty = 1
-            continue
-        
-        items_processed += 1
-        print(f'\n  [{items_processed}/{items_needing_summary}] Processing: {cap_item_type_name} {item_number}')
-        
-        # Build context (once per item)
-        context_string, conflicts = build_level_2_context(parsed_content, working_item, item_type_name, item_number)
-
-        # Log conflicting direct definitions if any
-        if conflicts:
-            document_issues_logfile = get_document_issues_logfile(proc.out_path)
-            for c in conflicts:
-                log_document_issue(
-                    document_issues_logfile,
-                    'conflicting_direct_definitions',
-                    item_type_name=item_type_name,
-                    item_number=item_number,
-                    issue_description=f"Multiple direct definitions in scope for term '{c.get('term','')}'",
-                    details=c
-                )
-        
-        # Prepare chunking
-        text = working_item['text']
-        breakpoints = working_item.get('breakpoints', [])
-
-        # Build metadata suffix for sections in duplicate sets
-        metadata_suffix = build_metadata_suffix(item_number, working_item, content_pointer, item_type_name_plural)
-
-        # chunk_text will yield single chunk if text is short or no breakpoints
-        try:
-            chunks = list(chunk_text(text, breakpoints, preferred_length=15000))
-            total_chunks = len(chunks)
-        except Exception as e:
-            raise InputError(f'level_2_summaries: chunking failed for {item_type_name} {item_number}: {e}')
-            exit(1)
-
-        # Create base prompt
-        base_prompt = create_level_2_base_prompt(proc, item_type_name, item_number, total_chunks)
-
-        # Setup caching
-        cache_prompt_list = prepare_context_for_caching(context_string, table_of_contents_cache)
-
-        # Process chunks
-        chunk_summaries = []
-
-        for i, chunk in enumerate(chunks):
-            # Augment this chunk with metadata (for _dup sections)
-            augmented_chunk = augment_chunk_with_metadata(chunk, metadata_suffix)
-
-            # Create chunk-specific prompt
-            chunk_prompt = create_chunk_summary_prompt(
-                base_prompt,
-                augmented_chunk,  # Use augmented chunk instead of plain chunk
-                i + 1,
-                total_chunks,
-                item_type_name,
-                item_number,
-                chunk_summaries,  # Empty on first iteration
-                unit_title=working_item.get('unit_title', '')
-            )
-            
-            print(f'    Chunk {i+1}/{total_chunks} of {cap_item_type_name} {item_number}...')
-            
-            # Query AI model (expecting plain text, not JSON)
-            # Use query_text_with_retry() to benefit from retry mechanism and proper cache handling
-            try:
-                result = query_text_with_retry(client, cache_prompt_list, chunk_prompt, logfile, max_tokens=0, max_retries=3, config=config, task_name='stage3.summary.level2')
-            except ModelError as e:
-                # Retry mechanism exhausted - this is a real failure
-                raise ModelError(f'level_2_summaries: Failed to get response for {item_type_name} {item_number}, chunk {i+1} after retries: {e}')
-                exit(1)
-            except Exception as e:
-                raise ModelError(f'level_2_summaries: Unexpected error for {item_type_name} {item_number}, chunk {i+1}: {e}')
-                exit(1)
-
-            # Extract summary text and clean it
-            summary_text = clean_summary_text(result)
-            if not summary_text:
-                # Clean up cache entry for this empty/meaningless response before raising error
-                # (query_text_with_retry should have handled this, but double-check)
-                from utils.api_cache import remove_cached_response
-                full_cache = ''.join(cache_prompt_list)
-                model_name = getattr(client, 'model', 'unknown')
-                remove_cached_response(full_cache, chunk_prompt, model_name, 0)
-                print(f'    [Cache cleanup] Removed empty summary cache entry for {item_type_name} {item_number}, chunk {i+1}')
-                raise ModelError(f'level_2_summaries: Empty summary response for {item_type_name} {item_number}, chunk {i+1}')
-                exit(1)
-            
-            chunk_summaries.append(summary_text)
-            
-            print(f'    Chunk {i+1} complete ({len(chunk_summaries[-1])} chars)')
-        
-        # Synthesize final summary
-        if total_chunks == 1:
-            final_summary = chunk_summaries[0]
-        else:
-            # For level 2 summaries, synthesize with appropriate paragraph count
-            try:
-                # Create synthesis prompt for level 2 (more detailed than level 1)
-                max_paragraphs = 5 + max(0, total_chunks - 1)
-                # Calculate total length of chunk summaries for length constraint
-                total_chunk_length = sum(len(s) for s in chunk_summaries)
-                synthesis_prompt = f"""Please create a final, cohesive summary of {item_type_name} {item_number}
-by synthesizing these summaries of its parts. The summary should be up to {max_paragraphs} paragraphs and should allow
-a legal practitioner to understand the rights, restrictions, and obligations set forth in this portion.
-The summary should not re-iterate which {item_type_name} is being summarized, that will be attached to the summary separately.
-**IMPORTANT: The final summary must not be longer than the combined length of the part summaries being synthesized.**
-
-"""
-                for i, summary in enumerate(chunk_summaries, 1):
-                    synthesis_prompt += f"Part {i}: {summary}\n\n"
-
-                synthesis_prompt += """
-Create a unified summary that captures the overall content without referencing part numbers.
-Return only the summary text, no preamble."""
-
-                # Use query_text_with_retry to benefit from retry mechanism for empty responses
-                result = query_text_with_retry(client, [], synthesis_prompt, logfile, max_tokens=0, max_retries=3, config=config, task_name='stage3.summary.level2.synthesis')
-                final_summary = clean_summary_text(result)
-            except ModelError as e:
-                # Retry mechanism exhausted - this is a real failure
-                raise ModelError(f'level_2_summaries: synthesis failed for {item_type_name} {item_number} after retries: {e}')
-                exit(1)
-            except Exception as e:
-                raise ModelError(f'level_2_summaries: unexpected synthesis error for {item_type_name} {item_number}: {e}')
-                exit(1)
-
-        if not final_summary:
-            # Clean up cache entry for this empty synthesis response before raising error
-            from utils.api_cache import remove_cached_response
-            model_name = getattr(client, 'model', 'unknown')
-            remove_cached_response('', synthesis_prompt, model_name, 0)
-            print(f'    [Cache cleanup] Removed empty synthesis cache entry for {item_type_name} {item_number}')
-            raise ModelError(f'level_2_summaries: Final summary is empty for {item_type_name} {item_number}')
-            exit(1)
-        
-        # CRITICAL: Set summary_2 and immediately ensure it's saved to prevent data loss
-        # Wrap in try/except to ensure flush happens even if subsequent code fails
-        try:
-            working_item['summary_2'] = final_summary
-            print(f'    [OK] {cap_item_type_name} {item_number} summary_2 complete ({len(final_summary)} chars)')
-            
-            # Update progress after each item for UI visibility
-            operational_counts, organizational_counts = count_stage_3_progress(parsed_content)
-            update_stage_3_progress(parsed_content, operational_counts, organizational_counts)
-            proc.dirty = 1
-            
-            # CRITICAL: Flush immediately if it's been more than 10 seconds since last flush
-            # This prevents data loss if an exception occurs before the regular flush
-            if proc.should_flush_by_time(time_threshold_seconds=10):
-                proc.flush()
-                print(f'  [Immediate flush] Saved {cap_item_type_name} {item_number} summary_2 to prevent data loss')
-            
-            count = count - 1
-            
-            # Periodic checkpoint: save progress every checkpoint_threshold items
-            if items_processed % checkpoint_threshold == 0:
-                proc.flush()
-                print(f'  [Checkpoint] Progress saved: {operational_counts["summary_2"]}/{operational_counts["total"]} operational items with summary_2')
-            else:
-                # Flush more frequently for UI updates (every 5 items OR if 30+ seconds have passed)
-                should_flush = False
-                if items_processed % 5 == 0:
-                    should_flush = True
-                elif proc.should_flush_by_time(time_threshold_seconds=30):
-                    should_flush = True
-                    print(f'  [Time-based flush] Flushing after {int(time_module.time() - proc.last_flush_time)} seconds')
-                
-                if should_flush:
-                    proc.flush()
-        except Exception as e:
-            # If anything fails after setting summary_2, ensure we flush before re-raising
-            # This prevents data loss if an exception occurs in progress updates or organizational handling
-            print(f'  [ERROR] Exception after setting summary_2 for {cap_item_type_name} {item_number}: {e}')
-            print(f'  [SAFETY] Flushing to save {cap_item_type_name} {item_number} summary_2 before re-raising exception...')
-            try:
-                proc.flush()
-            except Exception as flush_error:
-                print(f'  [CRITICAL] Failed to flush after exception: {flush_error}')
-            raise  # Re-raise the original exception
-        
-        if count < 1:
-            print(f'\n  Reached processing limit ({items_processed} items). More processing needed.')
+        cap_item_type_name = item_type_name[:1].upper() + item_type_name[1:] if item_type_name else ''
+        for item_number, working_item in content_pointer[item_type_name_plural].items():
+            if state['count'][0] < 1:
+                break
+            _process_item_level2(item_type_name, item_type_name_plural, cap_item_type_name,
+                                  item_number, working_item, state)
+        if state['count'][0] < 1:
             break
-        
-        # Boundary handling
-        if 'context' not in working_item.keys():
-            raise InputError('level_2_summaries: invalid parsed_content structure, no context in working_item.')
-            exit(1)
 
-        parent_key = _get_parent_key(parsed_content, working_item)
-        if parent_key is not None:
-            # Sub-unit path: trigger org summaries when switching parent containers
-            if current_parent_key is not None and parent_key != current_parent_key:
-                top_organization_summaries(proc, 2)
-            current_parent_key = parent_key
-        else:
-            # Regular item path: existing stop_tag logic
-            current_parent_key = None
-            org_content_pointer = get_org_pointer(parsed_content, working_item)
-            if 'stop_' + item_type_name in org_content_pointer.keys():
-                stop_tag = org_content_pointer['stop_' + item_type_name]
-                if stop_tag == item_number:
-                    top_organization_summaries(proc, 2)
-    
     proc.flush()
-    # Check if we processed all items that needed processing
-    # If count was exhausted (count < 1), we hit the limit and need more processing
-    if count < 1:
-        print('More processing needed.  Please run again.\n')
+    if state['count'][0] < 1:
+        print(f'\n  Reached processing limit ({state["items_processed"][0]} items). More processing needed.')
         return False
-    # Otherwise, we finished all items that needed processing
     return True
 
 
@@ -2193,22 +2415,6 @@ def process_file_stage_3(parse_file_path, output_file_path, client, logfile, che
         print(f'  Please run Stage 3 again to continue processing')
         return False
 
-    # Phase 2b: Aggregate sub-unit summary_1 into parent containers
-    try:
-        print(f'\n=== Phase 2b: Container Level 1 Summaries ===')
-        container_summaries(proc, 1)
-    except Exception as e:
-        print(f'  ERROR in Phase 2b: {e}')
-        import traceback
-        traceback_str = traceback.format_exc()
-        traceback.print_exc()
-        try:
-            exception_logfile = os.path.join(os.path.dirname(output_file_path), 'exceptions.log')
-            log_exception_to_file(exception_logfile, e, context=f'Phase 2b: Container Level 1 Summaries for {os.path.basename(output_file_path)}', traceback_str=traceback_str)
-        except:
-            pass
-        return False
-
     # Phase 2c: Re-run org level 1 summaries now that containers have summary_1.
     # Phase 1 ran before containers existed; org units whose children are containers
     # (e.g., the Part that contains the CCL supplement) never received summary_1.
@@ -2268,22 +2474,6 @@ def process_file_stage_3(parse_file_path, output_file_path, client, logfile, che
     if not level_2_complete:
         print(f'\n  [WARNING] Level 2 summaries not complete - more processing needed')
         print(f'  Please run Stage 3 again to continue processing')
-        return False
-
-    # Phase 4b: Aggregate sub-unit summary_2 into parent containers
-    try:
-        print(f'\n=== Phase 4b: Container Level 2 Summaries ===')
-        container_summaries(proc, 2)
-    except Exception as e:
-        print(f'  ERROR in Phase 4b: {e}')
-        import traceback
-        traceback_str = traceback.format_exc()
-        traceback.print_exc()
-        try:
-            exception_logfile = os.path.join(os.path.dirname(output_file_path), 'exceptions.log')
-            log_exception_to_file(exception_logfile, e, context=f'Phase 4b: Container Level 2 Summaries for {os.path.basename(output_file_path)}', traceback_str=traceback_str)
-        except:
-            pass
         return False
 
     # Update progress status after level 2
