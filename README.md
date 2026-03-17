@@ -81,15 +81,15 @@ streamlit run ui/view_document.py
 ### Run the Pipeline from the Command Line
 
 ```bash
-# Stage 1: parse a CFR document
-python cfr_set_parse.py path/to/ecfr-title15.xml
+# Stage 1: parse USC Title 1, Chapter 1 (Rules of Construction)
+python uslm_set_parse.py path/to/usc01.xml --title 1 --chapter 1
 
 # Stages 2 and 3: definitions and summaries (batch)
-python batch_process.py output/CFR/ --stages 2,3
+python batch_process.py output/USC/ --stages 2,3
 
 # Stage 4: ask a question
-python question_answering.py output/CFR/part774_processed.json \
-  "What semiconductor items require a license for export to France?"
+python question_answering.py output/USC/usc01_title1_chapter1_processed.json \
+  "If a company subject to a federal reporting obligation merges into another company, does the surviving company inherit that obligation?"
 ```
 
 Each stage can also be run individually:
