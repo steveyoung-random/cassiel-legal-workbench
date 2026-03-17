@@ -12,7 +12,7 @@ This wasn't a big problem for me, because I had read the statute a number of tim
 
 ---
 
-## The problem: why LLMs struggle with long documents
+## Why LLMs struggle with long documents
 
 Why did ChatGPT do this?  A simple and flippant answer is that these tools hallucinate and this is just evidence of the inherent unreliability of these tools, and for this reason they will never be useful.  I was pretty confident that this answer goes too far.  I thought this because I had already seen these tools do very useful things.  But it was clear that getting useful information from them based on a very long set of input was not reliable.  Trying out texts of different lengths confirmed that long before the input limit for ChatGPT is filled, it is likely to lose focus and fail to answer accurately about aspects of the text.  Since then, I have seen that this is a common issue with Large Language Models (LLMs) such as ChatGPT.[^1]
 
@@ -20,7 +20,7 @@ So, is a tool like this simply not useful in helping a lawyer work through a sub
 
 ---
 
-## A different approach: working through a document more like a lawyer does
+## Working through a document more like a lawyer does
 
 Thinking about this, it occurred to me that the issue the AI model was running into is not altogether different from what I as a human encounter when reading a very long document.  If I read the whole thing and someone asks me a question about it, I can talk about it at a certain level with reasonable accuracy.  But I don't memorize the text and if someone asks me a very specific question, I may not immediately know the answer, and I will need to go through the document again looking for that answer.  Humans process text as we read it, retaining a certain level of knowledge of what we have read as we move through it.  If an AI model is only able to keep a limited amount of text "in focus" at one time, it may simply be dealing with a version of what humans experience.  So I started wondering about stepping an AI model through a lengthy legal document in a manner that more closely reflects the way that I work through such a document.  This project is the result of that wondering.
 
@@ -36,7 +36,7 @@ The output of this process is a proposed answer that identifies the relevant pro
 
 ---
 
-## Why it matters that this is open source
+## Why open source
 
 A process like the one described here is almost certainly being used in various legal-tech systems already on the market.  The general approach of breaking a long document into pieces, summarizing those pieces, and using the summaries to guide a question-answering process is not an original idea.  What is unavailable, when using a commercial tool, is any real visibility into the specifics of how it is done.
 
