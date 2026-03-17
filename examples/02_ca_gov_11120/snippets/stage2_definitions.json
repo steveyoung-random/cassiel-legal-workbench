@@ -1,0 +1,52 @@
+{
+  "_note": "CA GOV § 11120 — Stage 2 definition data. Definitions operate at two levels here: an article-level definition of 'state body' that applies to all 13 sections in Article 9, and section-level definitions scoped to individual sections.",
+
+  "article_9_definitions": [
+    {
+      "_source": "Section 11121 (positive definition) + Section 11121.1 (carve-outs)",
+      "term": "state body",
+      "value": "As used in this article, 'state body' does not include any of the following: [courts, local agencies under Brown Act, legislature, UC/CSU governing boards, etc.]",
+      "def_kind": "elaboration",
+      "scope": "As used in this article",
+      "source_type": "section",
+      "source_number": "11121.1",
+      "quality_checked": true,
+      "_note": "Article-scoped — provided as context to every section in Article 9 during Stage 3 summarization and Stage 4 analysis."
+    }
+  ],
+
+  "section_11123.2_definitions": [
+    {
+      "term": "Teleconference",
+      "value": "\"Teleconference\" means a meeting of a state body, the members of which are at different locations, connected by electronic means, through either audio or video, or both.",
+      "indirect": "",
+      "scope": "For purposes of this section",
+      "def_kind": "direct",
+      "source_type": "section",
+      "source_number": "11123.2",
+      "quality_checked": true
+    },
+    {
+      "term": "Teleconference location",
+      "value": "\"Teleconference location\" means any location where a member of a state body participates in a teleconference meeting.",
+      "indirect": "",
+      "scope": "For purposes of this section",
+      "def_kind": "direct",
+      "source_type": "section",
+      "source_number": "11123.2",
+      "quality_checked": true
+    },
+    {
+      "term": "Remote location",
+      "value": "\"Remote location\" means a location from which a member of a state body participates in a meeting other than the primary physical location designated in the agenda.",
+      "indirect": "",
+      "scope": "For purposes of this section",
+      "def_kind": "direct",
+      "source_type": "section",
+      "source_number": "11123.2",
+      "quality_checked": true
+    }
+  ],
+
+  "_conflict_note": "The term 'teleconference' is defined in multiple sections (11123.2, 11123.5, 11123.5_dup) with slightly different language tailored to each section's scope. The conflict detection system identifies these as non-conflicting: each definition is scoped to its own section and the definitions are functionally equivalent at the section level."
+}

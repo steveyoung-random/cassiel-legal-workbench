@@ -1,0 +1,35 @@
+{
+  "_note": "EU AI Act Stage 3 summary data. 113 articles and 13 annexes all receive summaries. Selected below: Articles 1, 3, 53, 55 which are central to the Q&A question, plus the regulation-level organizational summary.",
+
+  "article_1": {
+    "unit_title": "Subject matter",
+    "text_length": 1026,
+    "summary_1": "It aims to improve the internal market and promote the uptake of human-centric, trustworthy AI while ensuring high protection of health, safety and fundamental rights, including democracy, rule of law, and environmental protection, against AI harms. It establishes harmonised rules for placing AI on the market, prohibitions on certain AI practices, requirements for high-risk AI systems and their operators, transparency rules, and rules for general-purpose AI models. It also sets up market monitoring, governance, and enforcement mechanisms, while supporting innovation especially for SMEs."
+  },
+
+  "article_3": {
+    "unit_title": "Definitions",
+    "text_length": 17135,
+    "summary_1": "Defines the core terms used throughout the Regulation, including provider, deployer, importer, distributor, and operator, and the key concepts of placing on the market, making available, putting into service, and intended use. It also sets out definitions for data protection and biometric data, safety components, and what constitutes a 'substantial modification'. Definitions of 'general-purpose AI model' and 'general-purpose AI model with systemic risk' are included, along with terms for notified bodies, standards, and the conformity marking."
+  },
+
+  "article_53": {
+    "unit_title": "Obligations for providers of general-purpose AI models",
+    "text_length": 3478,
+    "breakpoints_count": 6,
+    "summary_1": "Providers of general-purpose AI models must maintain up-to-date technical documentation (training, testing, and evaluation) per Annex XI and provide documentation to potential AI-system integrators per Annex XII to support compliance. They must adopt a copyright policy in line with Directive (EU) 2019/790, make a publicly available summary of training data, cooperate with the AI Office and national authorities, and register in the EU database. However, providers of AI models under qualifying free and open-source licences are exempt from the documentation and information-sharing obligations (but not from the copyright policy and cooperation duties) unless the model has systemic risk."
+  },
+
+  "article_55": {
+    "unit_title": "Obligations for providers of general-purpose AI models with systemic risk",
+    "text_length": 2100,
+    "summary_1": "Providers of general-purpose AI models with systemic risk must perform model evaluations (including adversarial testing) according to standardised protocols developed by the AI Office, assess and mitigate systemic risks, track and report serious incidents to the AI Office, ensure cybersecurity, and report their energy consumption. They may satisfy these obligations through codes of practice. These obligations are in addition to those required of all GPAI model providers under Article 53."
+  },
+
+  "regulation_level": {
+    "unit_title": "Regulation (EU) 2024/1689",
+    "articles": "1-113",
+    "annexes": "I-XIII",
+    "summary_1": "Together, the annexes and chapters establish a comprehensive EU framework to govern AI across safety, rights, and governance dimensions. The regulation defines prohibited AI practices, categorises AI systems by risk level, and imposes obligations on providers and deployers proportional to the risks posed. It establishes a conformity assessment and CE marking regime for high-risk AI systems, transparency obligations for certain AI systems, and a separate regime for general-purpose AI models. Governance is organised through national competent authorities and a central AI Office, with market surveillance, enforcement, and penalty provisions."
+  }
+}

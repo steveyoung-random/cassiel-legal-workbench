@@ -1,0 +1,52 @@
+{
+    "question": {
+        "text": "If a company subject to a federal reporting obligation merges into another company, does the surviving company inherit that obligation?"
+    },
+    "scores": {
+        "1": {
+            "1": 2,
+            "2": 0,
+            "3": 0,
+            "4": 0,
+            "5": 3,
+            "6": 0,
+            "7": 0,
+            "8": 0
+        }
+    },
+    "scratch": {
+        "fact": {
+            "fact_001": {
+                "content": "When the terms \"company\" or \"association\" are used in reference to a corporation, they are deemed to include the \"successors and assigns\" of that company/association as if those words were expressly included.",
+                "source": [
+                    "Section 5"
+                ]
+            },
+            "fact_002": {
+                "content": "Interpretive rule: the terms \"person\" and \"whoever\" include corporations, companies, associations, firms, partnerships, societies, joint stock companies, and individuals.",
+                "source": [
+                    "Section 1"
+                ]
+            }
+        },
+        "question": {},
+        "requests": {}
+    },
+    "working_answer": {
+        "text": "Yes—based on the provided text, the surviving (successor) company would be treated as inheriting the federal reporting obligation, to the extent that obligation is imposed on a “company” (or “association”) subject to the statute/rule.\n\n- The document provides a rule of construction that when the terms **“company”** or **“association”** are used in reference to a corporation, those terms are **deemed to include the corporation’s “successors and assigns”** as though those words were expressly included. This indicates that duties attached to a covered “company/association” continue to bind its successor following a merger. (Section 5)\n\n- The document also adopts an interpretive rule that the terms **“person”** and **“whoever”** include corporations and other entities. This supports that entity-level obligations (including reporting duties) can apply to corporate actors generally. (Section 1)\n\n### Key limitation / what remains uncertain\nThe excerpts do not contain the **specific reporting obligation language** (e.g., whether it is imposed on a “company,” “association,” “person,” “whoever,” or some other defined party), nor do they specify any merger-specific carve-outs or procedures. Because the successor-inclusion language is explicit for **“company”/“association”** (Section 5), the conclusion is strongest when the reporting duty is framed in those terms. If the reporting obligation is framed differently (or if another section limits successor liability for that particular duty), that could change the outcome—but no such limiting text is provided here."
+    },
+    "skip_list": [
+        "section_5",
+        "section_1"
+    ],
+    "progress": {
+        "scoring_complete": true,
+        "analysis_iterations_completed": 2,
+        "cleanup_complete": true,
+        "quality_check_complete": false,
+        "final_answer_complete": true
+    },
+    "cross_doc_scores": {},
+    "complete": true,
+    "qa_mode": "standard"
+}

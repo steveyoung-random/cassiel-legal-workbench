@@ -1,0 +1,28 @@
+{
+  "7": {
+    "unit_title": "Marriage",
+    "text": "    (a) For the purposes of any Federal law, rule, or regulation in which marital status is a factor, an individual shall be considered married if that individual's marriage is between 2 individuals and is valid in the State where the marriage was entered into or, in the case of a marriage entered into outside any State, if the marriage is between 2 individuals and is valid in the place where entered into and the marriage could have been entered into in a State.\n    (b) In this section, the term \"State\" means a State, the District of Columbia, the Commonwealth of Puerto Rico, or any other territory or possession of the United States.\n    (c) For purposes of subsection (a), in determining whether a marriage is valid in a State or a foreign jurisdiction, only the law of the jurisdiction applicable at the time the marriage was entered into may be considered.",
+    "breakpoints": [
+      [467, 1],
+      [642, 1]
+    ],
+    "context": [
+      { "title": "1" },
+      { "chapter": "1" }
+    ],
+    "notes": {},
+    "defined_terms": [
+      {
+        "term": "State",
+        "value": "In this section, the term \"State\" means a State, the District of Columbia, the Commonwealth of Puerto Rico, or any other territory or possession of the United States.",
+        "indirect": "",
+        "scope": "In this section",
+        "def_kind": "direct",
+        "source_type": "section",
+        "source_number": "7",
+        "scope_processed": true,
+        "quality_checked": true
+      }
+    ]
+  }
+}

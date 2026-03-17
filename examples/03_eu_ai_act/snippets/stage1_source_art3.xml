@@ -1,0 +1,46 @@
+<!-- Source: EU AI Act (Regulation (EU) 2024/1689), Article 3 — Definitions
+     Format: Formex 4 XML (EUR-Lex publishing format)
+     File: L_202401689EN.000101.fmx.xml
+
+     Formex uses its own tag vocabulary: ARTICLE/TI.ART/STI.ART for article structure,
+     PARAG/NO.PARAG/ALINEA for numbered paragraphs, LIST/ITEM/NP/NO.P/TXT for lists,
+     and QUOT.START/QUOT.END for the typographic quotation marks around defined terms.
+     The parser maps all of these to plain text plus structural metadata. -->
+
+<ARTICLE IDENTIFIER="003">
+  <TI.ART>Article 3</TI.ART>
+  <STI.ART><P>Definitions</P></STI.ART>
+
+  <ALINEA>
+    <P>For the purposes of this Regulation, the following definitions apply:</P>
+    <LIST TYPE="ARAB">
+
+      <ITEM><NP><NO.P>(1)</NO.P>
+        <TXT><QUOT.START CODE="2018"/>'AI system'<QUOT.END CODE="2019"/> means a
+        machine-based system that is designed to operate with varying levels of
+        autonomy and that may exhibit adaptiveness after deployment, and that, for
+        explicit or implicit objectives, infers, from the input it receives, how to
+        generate outputs such as predictions, content, recommendations, or decisions
+        that can influence physical or virtual environments;</TXT>
+      </NP></ITEM>
+
+      <ITEM><NP><NO.P>(2)</NO.P>
+        <TXT><QUOT.START CODE="2018"/>'risk'<QUOT.END CODE="2019"/> means the
+        combination of the probability of an occurrence of harm and the severity of
+        that harm;</TXT>
+      </NP></ITEM>
+
+      <ITEM><NP><NO.P>(3)</NO.P>
+        <TXT><QUOT.START CODE="2018"/>'provider'<QUOT.END CODE="2019"/> means a
+        natural or legal person, public authority, agency or other body that develops
+        an AI system or a general-purpose AI model or that has an AI system or a
+        general-purpose AI model developed and places it on the market or puts the
+        AI system into service under its own name or trademark, whether for payment
+        or free of charge;</TXT>
+      </NP></ITEM>
+
+      <!-- Article 3 continues for 65 total definitions ... -->
+
+    </LIST>
+  </ALINEA>
+</ARTICLE>

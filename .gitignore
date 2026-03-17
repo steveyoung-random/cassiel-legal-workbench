@@ -44,6 +44,8 @@ document_issues*.json
 parsing_issues*.json
 
 #Other
+WORKSTREAM_8_PLAN.md
+TASK_4_CONTENT_REFRESH.md
 ECFR-XML-User-Guide.md
 STAGE3_CONTAINER_CONTEXT_FIX.md
 UI_STYLE_GUIDE.md

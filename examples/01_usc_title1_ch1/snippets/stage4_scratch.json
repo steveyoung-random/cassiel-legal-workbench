@@ -1,0 +1,17 @@
+{
+  "_question": "If a company subject to a federal reporting obligation merges into another company, does the surviving company inherit that obligation?",
+  "_note": "The scratch document after 2 analysis iterations. Each fact is tagged with the section that contributed it. The 'question' and 'requests' buckets are empty here — the analysts were able to answer the question from the available sections without needing to ask follow-up questions or request additional sections.",
+
+  "fact": {
+    "fact_001": {
+      "content": "When the terms 'company' or 'association' are used in reference to a corporation, they are deemed to include the 'successors and assigns' of that company/association as if those words were expressly included.",
+      "source": ["Section 5"]
+    },
+    "fact_002": {
+      "content": "Interpretive rule: the terms 'person' and 'whoever' include corporations, companies, associations, firms, partnerships, societies, and joint stock companies.",
+      "source": ["Section 1"]
+    }
+  },
+  "question": {},
+  "requests": {}
+}

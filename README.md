@@ -6,7 +6,7 @@ Using an LLM to answer questions about lengthy statutes or regulations can lead 
 
 This is intended as a tool for legal professionals and is not as a substitute for professional judgment.  Think of it as a person of uneven capabilities who works down the hall.  This person is a very quick reader, remembers a lot, and is generally good at piecing things together, but also sometimes stumbles.  You stand to benefit from having that person of uneven capabilities take a look at your situation and tell you what they think.  If you take your job seriously, you are not going to just take what they give you as a definitive answer.  It will hopefully be a useful analysis to help you figure out what you think the right analysis is, even if that better analysis veers from their answer considerably.
 
-**[Paper / Technical Overview](#paper)** | MIT License
+**[Technical overview](docs/PIPELINE_OVERVIEW.md)** | **[Practitioner overview](docs/AI_AND_LEGAL_DOCUMENTS.md)** | MIT License
 
 ---
 
@@ -34,7 +34,7 @@ There are parsers for  set of document types.  All document-specific details (in
 | Formex XML | [European Union regulations](https://datadump.publications.europa.eu/) - free registration required, download in Formex XML format | `formex_set_parse.py` |
 | HTML       | [California statutes](https://leginfo.legislature.ca.gov/faces/codes.xhtml)                                                        | `CA_parse_set.py`     |
 
-New document types can be added via the parser plugin interface without modifying any of the processing stages.  See [`ADDING_NEW_PARSER.md`](ADDING_NEW_PARSER.md).
+New document types can be added via the parser plugin interface without modifying any of the processing stages.  See [`ADDING_NEW_PARSER.md`](docs/ADDING_NEW_PARSER.md).
 
 ---
 
@@ -101,7 +101,7 @@ python question_answering.py <processed_json> "your question" --mode thorough
 ```
 
 **Q&A modes**: `quick_scan`, `standard` (default), `thorough`,
-`maximum_confidence`. See [`USAGE_GUIDE.md`](USAGE_GUIDE.md) for details.
+`maximum_confidence`. See [`USAGE_GUIDE.md`](docs/USAGE_GUIDE.md) for details.
 
 ---
 
@@ -169,12 +169,14 @@ All model assignments, API keys, and directory paths are set in `config.json`.  
 
 | Document                                             | Purpose                                       |
 | ---------------------------------------------------- | --------------------------------------------- |
-| [`DEVELOPER_GUIDE.md`](DEVELOPER_GUIDE.md)           | Architecture, pipeline stages, file structure |
-| [`USAGE_GUIDE.md`](USAGE_GUIDE.md)                   | How to use all tools and scripts              |
-| [`JSON_SPECIFICATION.md`](JSON_SPECIFICATION.md)     | Parsed document format (v0.5)                 |
-| [`ADDING_NEW_PARSER.md`](ADDING_NEW_PARSER.md)       | How to add support for new document types     |
-| [`LARGE_TABLE_HANDLING.md`](LARGE_TABLE_HANDLING.md) | How large tables are extracted as sub-units   |
-| [`ui/VIEWER_GUIDE.md`](ui/VIEWER_GUIDE.md)           | Document viewer user guide                    |
+| [`PIPELINE_OVERVIEW.md`](docs/PIPELINE_OVERVIEW.md)       | Technical overview: pipeline design and motivation |
+| [`AI_AND_LEGAL_DOCUMENTS.md`](docs/AI_AND_LEGAL_DOCUMENTS.md) | Practitioner overview: approach and limitations |
+| [`DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md)           | Architecture, pipeline stages, file structure |
+| [`USAGE_GUIDE.md`](docs/USAGE_GUIDE.md)                   | How to use all tools and scripts              |
+| [`JSON_SPECIFICATION.md`](docs/JSON_SPECIFICATION.md)     | Parsed document format (v0.5)                 |
+| [`ADDING_NEW_PARSER.md`](docs/ADDING_NEW_PARSER.md)       | How to add support for new document types     |
+| [`LARGE_TABLE_HANDLING.md`](docs/LARGE_TABLE_HANDLING.md) | How large tables are extracted as sub-units   |
+| [`VIEWER_GUIDE.md`](docs/VIEWER_GUIDE.md)                 | Document viewer user guide                    |
 
 ---
 
@@ -199,19 +201,22 @@ Although I have been working on this system for a long time, and it is useable a
 - A redesigned question answering pipeline using role-separated phases (fact extraction question generation, answer collection) with a gatekeeper LLM reviewing each proposed fact before it enters the shared scratch document.  This addresses the current tendency toward fact churn and unfocused question accumulation in long documents (Workstream 8).
 - Systematic end-to-end testing across all four document types, and additional edge cases such as very long documents and deep nesting (Workstream 5).
 
-Some future work is described in the [PLANNED_ENHANCEMENTS](PLANNED_ENHANCEMENTS.md) document.
+Some future work is described in the [PLANNED_ENHANCEMENTS](docs/PLANNED_ENHANCEMENTS.md) document.
 
 ---
 
-## Paper
+## Papers
 
-A paper describing the motivation, design decisions, and lessons learned in building this system is in preparation. It will be linked here when it is completed.
+Two companion posts describe the motivation and design of this system:
+
+- [A processing pipeline for AI-assisted legal document analysis](docs/PIPELINE_OVERVIEW.md) — technical overview covering each pipeline stage, design decisions, and examples.
+- [Getting AI to reliably analyze statutes and regulations](docs/AI_AND_LEGAL_DOCUMENTS.md) — practitioner-facing overview of the approach, its limitations, and why the open-source design matters for legal work.
 
 ---
 
 ## License
 
-MIT — see [`LICENSE.txt`](LICENSE.txt).
+MIT — see [`LICENSE.md`](LICENSE.md).
 
 ---
 

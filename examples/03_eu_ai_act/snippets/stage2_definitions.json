@@ -1,0 +1,44 @@
+{
+  "_note": "EU AI Act Stage 2 definition data. Article 3 is a dedicated definitions article containing 65 numbered definitions scoped to the entire Regulation. Key definitions relevant to the Q&A question are shown. All are regulation-wide in scope.",
+
+  "article_3_selected_definitions": [
+    {
+      "term": "provider",
+      "value": "'provider' means a natural or legal person, public authority, agency or other body that develops an AI system or a general-purpose AI model or that has an AI system or a general-purpose AI model developed and places it on the market or puts the AI system into service under its own name or trademark, whether for payment or free of charge.",
+      "indirect": "",
+      "scope": "For the purposes of this Regulation",
+      "def_kind": "direct",
+      "source_type": "article",
+      "source_number": "3"
+    },
+    {
+      "term": "general-purpose AI model",
+      "value": "'general-purpose AI model' means an AI model, including where such an AI model is trained with a large amount of data using self-supervision at scale, that displays significant generality and is capable of competently performing a wide range of distinct tasks regardless of the way the model is placed on the market and that can be integrated into a variety of downstream systems or applications.",
+      "indirect": "",
+      "scope": "For the purposes of this Regulation",
+      "def_kind": "direct",
+      "source_type": "article",
+      "source_number": "3"
+    },
+    {
+      "term": "placing on the market",
+      "value": "'placing on the market' means the first making available of an AI system or a general-purpose AI model on the Union market.",
+      "indirect": "",
+      "scope": "For the purposes of this Regulation",
+      "def_kind": "direct",
+      "source_type": "article",
+      "source_number": "3"
+    },
+    {
+      "term": "substantial modification",
+      "value": "'substantial modification' means a change to an AI system after its placing on the market or putting into service which is not foreseen or planned in the initial conformity assessment performed by the provider and as a result of which the compliance of the AI system with the requirements set out in Chapter III, Section 2 is affected or results in a modification to the intended purpose for which the AI system has been assessed.",
+      "indirect": "",
+      "scope": "For the purposes of this Regulation",
+      "def_kind": "direct",
+      "source_type": "article",
+      "source_number": "3"
+    }
+  ],
+
+  "_note_scope": "All 65 definitions in Article 3 are regulation-wide. Unlike USC Title 1 (where definitions were section-scoped with 'In this section') or CA GOV 11120 (where 'state body' was article-scoped), every definition in the EU AI Act applies throughout the entire regulation. This means every analyst in Stage 4 receives the same definitional context."
+}

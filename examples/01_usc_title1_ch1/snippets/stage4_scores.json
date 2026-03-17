@@ -1,0 +1,29 @@
+{
+  "_question": "If a company subject to a federal reporting obligation merges into another company, does the surviving company inherit that obligation?",
+  "_note": "Scores are nested by organizational level: chapter '1' contains section scores. Score range is 0-5. Only sections scoring >= 3 are analyzed in the iterative Q&A phase; sections scoring 1-2 may be included as supporting context. Sections scoring 0 are skipped entirely.",
+
+  "scores": {
+    "1": {
+      "1": 2,
+      "2": 0,
+      "3": 0,
+      "4": 0,
+      "5": 3,
+      "6": 0,
+      "7": 0,
+      "8": 0
+    }
+  },
+
+  "_interpretation": {
+    "section_5": "Score 3 — 'Company or association includes successors and assigns' — directly answers the question",
+    "section_1": "Score 2 — 'Words denoting number, gender...' — defines 'person'/'whoever' to include corporations; supporting context",
+    "sections_2_3_4_6_7_8": "Score 0 — about counties, vessels, vehicles, fisheries, marriage, born-alive infants — not relevant"
+  },
+
+  "_performance": {
+    "analysis_iterations_completed": 2,
+    "qa_mode": "standard",
+    "complete": true
+  }
+}

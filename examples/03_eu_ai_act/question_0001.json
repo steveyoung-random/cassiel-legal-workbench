@@ -1,0 +1,335 @@
+{
+    "question": {
+        "text": "Are the obligations of a provider of a general purpose model limited if they only fine-tune it?"
+    },
+    "scores": {
+        "2": {
+            "1": 2,
+            "2": 3,
+            "3": 3,
+            "4": 2,
+            "5": 1,
+            "6": 2,
+            "7": 2,
+            "8": 2,
+            "9": 2,
+            "10": 2,
+            "11": 3,
+            "12": 2,
+            "13": 2,
+            "14": 2,
+            "15": 2,
+            "16": 3,
+            "17": 3,
+            "18": 3,
+            "19": 3,
+            "20": 3,
+            "21": 2,
+            "22": 1,
+            "23": 0,
+            "24": 0,
+            "25": 3,
+            "26": 1,
+            "27": 1,
+            "40": 3,
+            "41": 3,
+            "42": 1,
+            "43": 1,
+            "44": 0,
+            "45": 0,
+            "46": 0,
+            "47": 1,
+            "48": 0,
+            "49": 2,
+            "50": 2,
+            "51": 3,
+            "52": 3,
+            "53": 3,
+            "54": 2,
+            "55": 3,
+            "56": 2,
+            "57": 0,
+            "58": 0,
+            "59": 0,
+            "60": 0,
+            "61": 0,
+            "62": 0,
+            "63": 1,
+            "64": 0,
+            "65": 0,
+            "66": 3,
+            "67": 1,
+            "68": 3,
+            "69": 2,
+            "70": 2,
+            "71": 3,
+            "72": 3,
+            "73": 1,
+            "74": 2,
+            "75": 3,
+            "76": 1,
+            "77": 2,
+            "78": 2,
+            "79": 2,
+            "80": 2,
+            "81": 1,
+            "82": 2,
+            "83": 0,
+            "84": 1,
+            "85": 1,
+            "86": 1,
+            "87": 0,
+            "88": 3,
+            "89": 3,
+            "90": 2,
+            "91": 3,
+            "92": 3,
+            "93": 3,
+            "94": 2,
+            "95": 1,
+            "96": 3,
+            "99": 2,
+            "100": 0,
+            "101": 2,
+            "102": 2,
+            "103": 2,
+            "104": 2,
+            "105": 2,
+            "106": 2,
+            "107": 2,
+            "108": 2,
+            "109": 2,
+            "110": 1,
+            "111": 3,
+            "112": 1,
+            "113": 2
+        },
+        "3": {
+            "I": 0,
+            "II": 0,
+            "III": 2,
+            "IV": 2,
+            "V": 1,
+            "VI": 2,
+            "VII": 2,
+            "VIII": 2,
+            "IX": 1,
+            "X": 0,
+            "XI": 3,
+            "XII": 3,
+            "XIII": 2
+        }
+    },
+    "scratch": {
+        "fact": {
+            "fact_001": {
+                "content": "Whether obligations apply depends primarily on whether an entity qualifies as a relevant operator (notably a “provider”) and places a GPAI model / AI system on the Union market or puts it into service (including certain extraterritorial cases where outputs are used in the Union), not on whether the model was trained from scratch vs fine-tuned.",
+                "source": [
+                    "Article 1",
+                    "Article 2"
+                ]
+            },
+            "fact_002": {
+                "content": "A “provider” is an entity that develops (or has developed) an AI system or a general-purpose AI model and places it on the market or puts the AI system into service under its own name/trademark (paid or free). An entity that fine-tunes a GPAI model and then places/puts into service the resulting model/system under its own name can qualify as a provider; fine-tuning alone does not trigger provider obligations unless the fine-tuner meets the provider definition (notably by placing/making available/putting into service under its name). “Placing on the market” includes first making available a GPAI model on the Union market.",
+                "source": [
+                    "Article 3"
+                ]
+            },
+            "fact_003": {
+                "content": "Baseline obligations for providers of GPAI models (Art 53(1)) include: (a) maintaining technical documentation per Annex XI; (b) providing documentation/information to downstream AI system providers per Annex XII; (c) implementing a copyright/related-rights compliance policy (incl. respecting opt-outs under Directive (EU) 2019/790 Art 4(3)); and (d) publishing a sufficiently detailed public summary of training content per an AI Office template; plus cooperation with authorities (Art 53(3)). These obligations are not reduced merely because the provider only fine-tuned.",
+                "source": [
+                    "Article 53"
+                ]
+            },
+            "fact_004": {
+                "content": "GPAI-model provider obligations are limited only in specific cases, not merely because the provider only fine-tunes: (i) Art 53(1)(a) and (b) do not apply to providers of AI models released under a qualifying free and open-source licence with publicly available parameters (incl. weights), architecture information, and usage information; (ii) third-country providers must appoint an EU authorised representative before placing a GPAI model on the Union market (Art 54), but this authorised-representative requirement also does not apply to such qualifying free/open-source releases. Neither limitation applies to GPAI models with systemic risk.",
+                "source": [
+                    "Article 53",
+                    "Article 54"
+                ]
+            },
+            "fact_005": {
+                "content": "Annex XI (technical documentation for GPAI models) requires documentation (as appropriate to model size/risk profile) covering architecture/parameters; intended tasks and integration context; acceptable use policies; release/distribution and licence; development process (training methodologies/techniques and key design choices); training/testing/validation data (type/provenance, curation, scope/characteristics, selection); measures to detect unsuitable sources and identifiable biases (where applicable); and training compute/time/energy (known or estimated). For GPAI models with systemic risk, Annex XI additionally requires documenting evaluation strategies/results and (where applicable) adversarial testing and model adaptations, explicitly including alignment and fine-tuning.",
+                "source": [
+                    "Annex XI"
+                ]
+            },
+            "fact_006": {
+                "content": "Annex XII specifies minimum information/documentation a GPAI model provider must supply to downstream providers integrating the model, including model description (intended tasks/integration context, acceptable use policies, release/distribution, external hardware/software interaction, relevant software versions, architecture/number of parameters, input/output modalities and formats, licence) and integration information (technical means to integrate; max input/output sizes such as context window). Information on training/testing/validation data type, provenance and curation is required only “where applicable.”",
+                "source": [
+                    "Annex XII"
+                ]
+            },
+            "fact_007": {
+                "content": "A GPAI model has “systemic risk” if it has high impact capabilities (assessed via tools/methodologies, indicators and benchmarks) or is designated by the Commission considering Annex XIII criteria; there is a presumption of high impact capabilities where cumulative training compute exceeds 10^25 FLOPs. Providers must notify the Commission without delay and within two weeks when the compute-threshold condition is met; the Commission may designate systemic-risk models and publishes/updates a list.",
+                "source": [
+                    "Article 51",
+                    "Article 52",
+                    "Annex XIII"
+                ]
+            },
+            "fact_008": {
+                "content": "Providers of GPAI models with systemic risk have additional obligations (Art 55): state-of-the-art evaluation using standardised protocols/tools (incl. documented adversarial testing) to identify/mitigate systemic risks; assess and mitigate possible systemic risks at Union level; track, document, and report serious incidents and corrective measures without undue delay to the AI Office (and as appropriate national authorities); and ensure adequate cybersecurity for the model and its physical infrastructure. These apply based on being the provider of a systemic-risk GPAI model, not on whether the provider trained from scratch vs fine-tuned.",
+                "source": [
+                    "Article 55"
+                ]
+            },
+            "fact_009": {
+                "content": "For high-risk AI systems: “substantial modification” is a change after placing on the market/putting into service not foreseen/planned in the initial conformity assessment that affects compliance with Chapter III Section 2 or modifies intended purpose. Fine-tuning can be relevant where it changes compliance or intended purpose. If a party substantially modifies a high-risk AI system already on the market/in service (and it remains high-risk), or modifies intended purpose so that an AI system (including a general-purpose AI system) becomes high-risk, that party is deemed the provider and becomes subject to provider obligations; the initial provider must cooperate/provide needed information/assistance in specified circumstances.",
+                "source": [
+                    "Article 3",
+                    "Article 25"
+                ]
+            },
+            "fact_010": {
+                "content": "Providers of high-risk AI systems have broad obligations (e.g., ensure compliance with Chapter III Section 2; implement a quality management system; maintain documentation/logs where under their control; perform conformity assessment before placing on the market/putting into service; EU declaration of conformity; CE marking; registration where required; corrective actions/notifications; provide information to authorities; accessibility compliance). These obligations are not reduced merely because the provider only fine-tunes a model used in the system.",
+                "source": [
+                    "Article 16"
+                ]
+            },
+            "fact_011": {
+                "content": "High-risk AI system technical documentation must be prepared before placing on the market/putting into service, kept up to date, and include at least Annex IV elements; SMEs/start-ups may provide Annex IV elements in simplified manner via a Commission form accepted by notified bodies. Annex IV requires documentation of the development process, including (where relevant) use/integration/modification of pre-trained systems/tools from third parties (capturing fine-tuning) and lifecycle changes/change-management relevant to ongoing compliance.",
+                "source": [
+                    "Article 11",
+                    "Annex IV"
+                ]
+            },
+            "fact_012": {
+                "content": "For high-risk AI systems using techniques involving training of AI models with data (which can include fine-tuning), training/validation/testing datasets must meet Article 10 data quality and governance requirements; if the system is developed without such training techniques, Article 10(2)-(5) applies only to the testing datasets.",
+                "source": [
+                    "Article 10"
+                ]
+            },
+            "fact_013": {
+                "content": "Transparency obligations under Article 50 can apply to providers of AI systems (explicitly including general-purpose AI systems) and to deployers in specified cases (e.g., deepfakes; certain synthetic-content and AI-generated public-interest text disclosures). These obligations are triggered by the system’s functionality/use-case, not by whether the underlying model was trained vs fine-tuned.",
+                "source": [
+                    "Article 50"
+                ]
+            },
+            "fact_014": {
+                "content": "Key scope exclusions/limitations potentially reducing obligations (not fine-tuning-specific) include: AI systems/models developed and put into service for the sole purpose of scientific research and development; and research/testing/development activities prior to placing on the market or putting into service (but not real-world testing).",
+                "source": [
+                    "Article 2"
+                ]
+            }
+        },
+        "question": {
+            "question_001": {
+                "content": "Do the Regulation’s GPAI-model provisions (definitions and provider obligations) specify reduced/modified obligations for entities that only fine-tune an existing general-purpose model (as opposed to training it from scratch), and if so under what conditions (e.g., who is deemed the 'provider' after fine-tuning, and what triggers obligations)?",
+                "source": [
+                    "Article 3",
+                    "Article 53",
+                    "Article 54",
+                    "Article 55"
+                ],
+                "importance": 3,
+                "answers": {
+                    "answer_001": {
+                        "content": "No fine-tuning-specific reduced track in Chapter V: obligations in Article 53 apply to “providers of general-purpose AI models” and do not vary based on whether the provider trained from scratch vs fine-tuned. Provider status hinges on Article 3 (develops/has developed + places on the market/puts into service under its name). The only explicit limitation in Article 53 is the Art 53(2) open-source carve-out, which removes only Art 53(1)(a)-(b) and is unavailable for systemic-risk models.",
+                        "source": [
+                            "Article 3",
+                            "Article 53"
+                        ]
+                    },
+                    "answer_002": {
+                        "content": "Additional systemic-risk obligations in Article 55 apply based on systemic-risk status and being the provider, not on whether training was from scratch vs fine-tuning.",
+                        "source": [
+                            "Article 55"
+                        ]
+                    },
+                    "answer_003": {
+                        "content": "Article 54 imposes an EU authorised-representative requirement on third-country providers placing GPAI models on the Union market; it is not reduced for fine-tuners as such, and is only waived for qualifying open-source releases (unless systemic risk).",
+                        "source": [
+                            "Article 54"
+                        ]
+                    }
+                }
+            },
+            "question_002": {
+                "content": "When can fine-tuning/modification make a downstream actor the 'provider' of a high-risk AI system (substantial modification / intended purpose change), and does that shift full high-risk provider obligations onto the fine-tuner?",
+                "source": [
+                    "Article 3",
+                    "Article 25"
+                ],
+                "importance": 2,
+                "answers": {
+                    "answer_001": {
+                        "content": "Article 3 defines “substantial modification” (post-market change not foreseen/planned that affects Chapter III Section 2 compliance or modifies intended purpose).",
+                        "source": [
+                            "Article 3"
+                        ]
+                    },
+                    "answer_002": {
+                        "content": "Article 25 reallocates “provider” status (and thus full Article 16 obligations) to a downstream actor that substantially modifies a high-risk AI system (and it remains high-risk) or changes intended purpose so a system (including a general-purpose AI system) becomes high-risk; this can capture fine-tuning where it has those effects.",
+                        "source": [
+                            "Article 25"
+                        ]
+                    }
+                }
+            },
+            "question_003": {
+                "content": "Do the systemic-risk compute thresholds clarify whether compute from fine-tuning is included in “cumulative computation used for training”?",
+                "source": [
+                    "Article 51",
+                    "Annex XI",
+                    "Annex XIII"
+                ],
+                "importance": 2,
+                "answers": {
+                    "answer_001": {
+                        "content": "Article 51(2) sets the presumption by reference to “cumulative amount of computation used for its training” (>10^25 FLOPs) but does not clarify whether this includes post-training fine-tuning compute.",
+                        "source": [
+                            "Article 51"
+                        ]
+                    },
+                    "answer_002": {
+                        "content": "Annex XI requires documenting training compute and separately (for systemic-risk models, where applicable) “model adaptations, including alignment and fine-tuning,” but does not expressly resolve whether fine-tuning compute is included in the Article 51 compute metric.",
+                        "source": [
+                            "Annex XI"
+                        ]
+                    },
+                    "answer_003": {
+                        "content": "Annex XIII includes training compute as a designation criterion but does not specify treatment of fine-tuning compute.",
+                        "source": [
+                            "Annex XIII"
+                        ]
+                    }
+                }
+            }
+        },
+        "requests": {}
+    },
+    "working_answer": {
+        "text": "No. The provider obligations for a general-purpose AI (“GPAI”) model are not *generally* limited just because the provider “only” fine-tunes an existing model rather than training from scratch.\n\n### 1) Obligations turn on “provider” status and market/service triggers—not on scratch training vs. fine‑tuning\nThe Regulation’s applicability and operator obligations primarily depend on whether an entity qualifies as a relevant operator (notably a “provider”) and whether it places a GPAI model/AI system on the Union market or puts it into service (including certain extraterritorial situations tied to use of outputs in the Union). That analysis does **not** hinge on whether the model was trained from scratch or fine‑tuned. (Article 1; Article 2)\n\nA “provider” includes an entity that develops (or has developed) a GPAI model and places it on the market or puts it into service under its own name/trademark; an entity that fine‑tunes a GPAI model and then makes the resulting model/system available under its own name can therefore qualify as a provider. Fine‑tuning **by itself** does not automatically trigger provider obligations unless the fine‑tuner meets the provider definition and the placing/putting-into-service trigger. (Article 3)\n\n### 2) If the fine‑tuner is the provider, the baseline GPAI provider obligations apply in full\nWhere the fine‑tuner is a “provider of a GPAI model,” the baseline obligations in Article 53(1) apply (e.g., technical documentation; downstream information/documentation; copyright compliance policy; public summary of training content; plus cooperation duties). These obligations are not reduced merely because the provider’s work consisted of fine‑tuning rather than end‑to‑end training. (Article 53)\n\nThe documentation obligations also contemplate and can capture fine‑tuning: Annex XI requires technical documentation appropriate to the model’s size/risk profile, and for systemic-risk GPAI models it expressly includes documentation of “model adaptations, including alignment and fine-tuning” (where applicable). (Annex XI) Downstream documentation to integrators is governed by Annex XII (with certain dataset-related elements only “where applicable”). (Annex XII)\n\n### 3) The Regulation provides *specific* limitation carve‑outs—but they are not “fine‑tuning” carve‑outs\nProvider obligations can be limited in certain defined cases—most notably for qualifying free/open-source releases. In particular, Article 53(1)(a) and (b) (technical documentation and downstream provider documentation) do **not** apply to providers releasing AI models under a qualifying free and open-source licence with the required public availability conditions; and the EU authorised representative requirement for third-country providers is similarly waived for such qualifying open-source releases. These limitations are **not** tied to whether the provider fine‑tuned; they are tied to the licensing/release conditions. (Article 53; Article 54)\n\nThese carve-outs also do **not** apply to GPAI models with systemic risk. (Article 53; Article 54)\n\n### 4) If the fine‑tuned model is a “systemic risk” GPAI model, obligations may increase (not decrease)\nIf the fine-tuned model qualifies as a GPAI model with “systemic risk,” the provider has additional duties (evaluation/adversarial testing, systemic risk mitigation, serious incident reporting, cybersecurity). Again, these depend on systemic-risk status and being the provider—not on whether the provider trained from scratch or fine‑tuned. (Article 55)\n\n**Uncertainty to note:** the presumption of “high impact capabilities” references “cumulative amount of computation used for its training” (>10^25 FLOPs), but the materials provided do not clarify whether post-training fine-tuning compute counts toward that metric; Annex XI requires documenting adaptations including fine-tuning, but does not resolve the compute-accounting point. This matters because systemic-risk classification drives additional obligations. (Article 51; Annex XI; Annex XIII)\n\n### 5) Separate issue: fine‑tuning can shift “provider” status for *high‑risk AI systems* via “substantial modification”\nIf the fine‑tuning occurs in the context of a **high-risk AI system** and amounts to a “substantial modification” (or changes intended purpose so that a system becomes high-risk), the modifying actor can be deemed the provider and becomes subject to the high-risk provider obligations. Fine-tuning can be relevant if it affects compliance or intended purpose. (Article 3; Article 25) High-risk provider obligations are broad and are not reduced merely because the system was built via fine‑tuning. (Article 16)\n\n### Bottom line\nFine‑tuning does **not** create a reduced obligation track. If, after fine‑tuning, the actor qualifies as a “provider” and places the resulting GPAI model/system on the market or puts it into service, the standard GPAI provider obligations apply (and may expand if the model is systemic-risk). Any limitation comes from specific statutory carve-outs (e.g., qualifying open-source releases) or scope exclusions (e.g., R&D prior to placing on the market), not from the fact of fine‑tuning itself. (Article 3; Article 53; Article 54; Article 2)"
+    },
+    "skip_list": [
+        "article_69",
+        "article_70",
+        "article_19",
+        "article_40",
+        "article_88",
+        "article_89",
+        "annex_XII",
+        "article_1",
+        "article_82",
+        "annex_VI",
+        "annex_VIII",
+        "article_68",
+        "article_92",
+        "article_4",
+        "article_106",
+        "article_109",
+        "article_113",
+        "annex_III"
+    ],
+    "progress": {
+        "scoring_complete": true,
+        "analysis_iterations_completed": 4,
+        "cleanup_complete": true,
+        "quality_check_complete": false,
+        "final_answer_complete": true
+    },
+    "cross_doc_scores": {},
+    "complete": true,
+    "qa_mode": "standard"
+}

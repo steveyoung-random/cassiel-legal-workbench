@@ -1,0 +1,38 @@
+{
+  "_note": "Stage 3 summary data for CA GOV § 11120 — Article 9, Meetings. The document has 43 sections. Selected summaries shown for the sections most relevant to the Q&A question and the article-level organizational summary.",
+
+  "section_11120": {
+    "unit_title": "(purpose/intent — Bagley-Keene Open Meeting Act)",
+    "text_length": 851,
+    "summary_1": "Public policy favors open proceedings by public agencies to keep the public informed and ensure accountability in the conduct of the people's business. It states the legislature's intent that agency actions and deliberations be conducted openly, and that the people retain sovereignty and oversight by remaining informed. The act is known as the Bagley-Keene Open Meeting Act.",
+    "summary_2": "Public agencies exist to aid in the people's business, and their proceedings must be conducted openly so the public remains informed. The Legislature intends that state agency actions be taken openly and that deliberations occur in the open. The people retain sovereignty and do not delegate authority to public servants to decide what the public should or should not know; transparency is essential so the public can remain informed and retain control over the instruments they create. This article is known as the Bagley-Keene Open Meeting Act."
+  },
+
+  "section_11121": {
+    "unit_title": "(definition of 'state body')",
+    "text_length": 1318,
+    "breakpoints": [[67,1],[270,1],[415,1],[709,1],[1108,1]],
+    "summary_1": "Defines 'state body' to include state boards, commissions, or multimember bodies created by statute or executive order; boards exercising delegated authority; advisory bodies with three or more members created by formal action; and boards where a state body member serves as an official representative funded by the state body. It also adds the State Bar of California, operative April 1, 2016, as described in Section 6001 of the Business and Professions Code.",
+    "summary_2": "The term 'state body' encompasses: (a) every state board, commission, or similar multimember body created by statute or required by law to conduct official meetings, and every commission created by executive order. It also includes: (b) a board, commission, committee, or similar multimember body that exercises any authority delegated to it by a state body; and (c) an advisory board, advisory commission, advisory committee, advisory subcommittee, or similar multimember advisory body of a state body, if created by formal action of the state body or of any member of the state body... The State Bar of California is expressly included as a state body for purposes of this article, operative April 1, 2016."
+  },
+
+  "section_11123": {
+    "unit_title": "(open meetings requirement)",
+    "text_length": 2440,
+    "summary_1": "All meetings of a state body must be open to the public, and teleconference meetings are allowed if they comply with the article, including posting agendas at all teleconference locations, identifying those locations, and ensuring public access and rollcall voting, with at least one member physically present. The portion of teleconferenced meetings that is open to the public must be audible at the location specified in the notice, and the closed portion may not include items heard under Section 11125.5. After any action, the state body must publicly report the action and each member's vote or abstention.",
+    "summary_2": "Section (a) requires all meetings of a state body to be open and public, with attendance permitted for all persons unless the article provides otherwise. This establishes a general right of public access to meetings. Section (b)(1) permits meetings via teleconference for the public's benefit, provided all applicable meeting requirements are met. The public portion of a teleconferenced meeting must be audible at the notice-specified location, agendas must be posted at every teleconference location, and each location must be identified in the notice and accessible to the public. Members of the public must be given an opportunity to directly address each teleconference location, and at least one member must be physically present at each teleconference location..."
+  },
+
+  "section_11124": {
+    "unit_title": "(no mandatory sign-in)",
+    "text_length": 1062,
+    "summary_1": "Attendance cannot be conditioned on signing in, providing information, or completing a questionnaire to attend a state body meeting. If an attendance list is posted, it must state that signing is voluntary and that attendance is allowed regardless of whether a person signs. Online platforms for teleconferenced attendance may permit pseudonyms or anonymous information, and the pre-attendance requirements do not apply to such online logins.",
+    "summary_2": "Section 11124(a) prohibits conditioning attendance at a state body meeting on signing in or providing information, completing a questionnaire, or any other prerequisite to attendance; individuals may attend without fulfilling such requirements. Section 11124(b) if an attendance list, register, questionnaire, or similar document is posted or circulated, it must clearly state that signing or completing the document is voluntary and that attendance is allowed regardless. Section 11124(c) clarifies that these provisions do not apply to information required by an internet platform to allow teleconference access, provided that participants may use a pseudonym or anonymous information."
+  },
+
+  "article_9": {
+    "unit_title": "ARTICLE 9. Meetings",
+    "sections": "11120-11132",
+    "summary_1": "A comprehensive framework establishing the open meeting regime for state bodies under the Bagley-Keene Open Meeting Act, defining which entities are covered, what constitutes an action and a meeting, and how proceedings must be conducted to promote transparency, public participation, and accountability. It sets mandatory open meetings with public access, advance notice, posted agendas, and accessibility requirements, while permitting limited teleconference participation with specific conditions and eventual sunset dates. It requires new and continuing members to be informed of the open meetings rules, and it outlines how actions, votes, and attendance are to be recorded and publicly reported. It delineates the scope and procedures for closed sessions — highlighting attorney-client privilege, disclosure requirements, and post-session reporting — along with the processes for emergency, special, and urgent meetings with expedited notice. The act also addresses public-records provisions, the right to record open proceedings, and privacy rules for identifying victims, while prohibiting attendance restrictions based on discrimination or inaccessible venues. Finally, it provides enforcement mechanisms, including mandamus and cost-shifting incentives, and sanctions for noncompliance, creating a comprehensive, enforceable system to ensure open, accessible, and accountable public governance."
+  }
+}

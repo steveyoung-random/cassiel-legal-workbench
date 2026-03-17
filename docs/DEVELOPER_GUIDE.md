@@ -11,7 +11,7 @@ This guide provides essential information for developers working on the Cassiel 
 - [`JSON_SPECIFICATION.md`](JSON_SPECIFICATION.md) - Data format specification (v0.3 / v0.5)
 - [`ADDING_NEW_PARSER.md`](ADDING_NEW_PARSER.md) - Guide for adding new parsers
 - [`PLANNED_ENHANCEMENTS.md`](PLANNED_ENHANCEMENTS.md) - Future features and improvements
-- [`ui/VIEWER_GUIDE.md`](ui/VIEWER_GUIDE.md) - Document viewer user guide
+- [`VIEWER_GUIDE.md`](VIEWER_GUIDE.md) - Document viewer user guide
 
 ---
 
@@ -101,17 +101,13 @@ cassiel-legal-workbench/
 │   ├── xml_processing.py    # XML parsing
 │   ├── manifest_utils.py    # Manifest file management
 │   └── ...
-├── tools/                   # Developer utility scripts
-│   ├── log_viewer.py        # AI query log viewer
-│   ├── analyze_cfr_elements.py  # CFR XML element analysis
-│   ├── detect_long_units.py # Scan parsed output for long units; reports patterns and subdivision candidates
-│   └── ...                  # Other utilities
-├── testing/                 # Test files and test infrastructure
-│   ├── model_comparison/    # AI model output comparison tool
-│   ├── test_harness/        # Table evaluation test harness
-│   ├── test_*.py            # Test scripts
-│   └── ...                  # Test data and fixtures
-└── archive/                 # Historical documents and old code
+└── tools/                   # Developer utility scripts
+    ├── analyze_qa_log.py    # Q&A log: unit trace and compaction analysis
+    ├── analyze_qa_logs.py   # Q&A log: session overview (analyst calls, facts, questions)
+    ├── log_viewer.py        # Interactive prompt/response viewer for any stage (Stage 2, 3, or 4 log files)
+    ├── analyze_cfr_elements.py  # CFR XML element analysis
+    ├── detect_long_units.py # Scan parsed output for long units; reports patterns and subdivision candidates
+    └── ...                  # Other utilities
 ```
 
 ---
@@ -525,9 +521,10 @@ Batch processing is implemented as a standalone script (`batch_process.py`) rath
 ## Testing & Debugging
 
 **Tools:**
-- `tools/log_viewer.py` - View and analyze AI query logs (see [`tools/README_analyze_qa_logs.md`](tools/README_analyze_qa_logs.md))
-- **Document Issues Logs** (`document_issues*.json`) - Scope resolution and processing issues
-- **Parsing Issues Logs** (`parsing_issues*.json`) - Parser corrections and malformed content
+- **Stage 4 (Q&A) logs:** `tools/analyze_qa_log.py` (unit trace, compaction) and `tools/analyze_qa_logs.py` (session overview). See [`tools/README_analyze_qa_logs.md`](../tools/README_analyze_qa_logs.md).
+- **Stage 2 and Stage 3 logs:** `tools/log_viewer.py` — interactive split-screen viewer for any AI call log (`log0001.json`, etc.). Run e.g. `python tools/log_viewer.py <path/to/log0001.json>`. Use next/prev, goto entry, and scroll each side; optional `rich` for better UI.
+- **Document Issues Logs** (`document_issues*.json`) - Scope resolution and processing issues (no dedicated viewer; inspect JSON in output directory).
+- **Parsing corrections** - Logged via `log_parsing_correction()` to document-issues-style logs when provided.
 
 **Debugging Tips:**
 1. Check log files for detailed error information

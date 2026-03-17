@@ -1,0 +1,377 @@
+{
+    "document_information": {
+        "version": "0.5",
+        "parameters": {
+            "1": {
+                "name": "section",
+                "name_plural": "sections",
+                "operational": 1
+            }
+        },
+        "organization": {
+            "item_types": [
+                1
+            ],
+            "content": {
+                "title": {
+                    "1": {
+                        "unit_title": "GENERAL PROVISIONS",
+                        "chapter": {
+                            "1": {
+                                "unit_title": "RULES OF CONSTRUCTION",
+                                "begin_section": "1",
+                                "stop_section": "8",
+                                "summary_1": "Taken together, these provisions broaden and harmonize federal statutory interpretation and scope by expanding who and what is covered, how terms are read, and where authority applies. They extend defined terms to include individuals and entities such as corporations, broaden instruments like signatures and writings, and treat masculine terms as inclusive of women while recognizing present-tense terms as covering the future. They expand geographic and jurisdictional concepts by including parishes as counties and by establishing federal recognition rules for marriages across states and territories, with limits tied to the law in effect at the time of the marriage. They widen the definitions of vessels and vehicles to encompass all waterborne and land transportation means and ensure contracts and duties bind successors and assigns of companies. They narrow what counts as products of American fisheries by excluding certain foreign-made items produced with foreign labor. Finally, they broaden the meaning of 'person,' 'human being,' 'child,' and 'individual' to include every born-alive infant at any development stage, defined by physiological signs of life, while preserving other rights. Overall, the set aims to standardize terminology, extend regulatory reach, and clarify federal-law application across diverse contexts.",
+                                "summary_2": "The material presents a cohesive framework for how terms used in laws and regulations are interpreted to achieve broad and consistent coverage across entities, contexts, and jurisdictions. It emphasizes a flexible, context-driven approach to language, ensuring that singular and plural terms, gendered language, and present-tense terms apply to a wide range of people and situations, including corporations and other non-individual entities. It also expands the scope of several defined terms--such as officer, signature, oath, writing, and the concept of a \"person\"--to ensure that duties, rights, and formal actions properly attach to the intended actors and modes of expression.\nIn addition, the set broadens or narrows particular categories to align regulatory outcomes with policy goals. It expands what counts as a county to include parishes and equivalent subdivisions, and it broadens the concept of vessels and vehicles to cover all watercraft and any land-transport device, respectively. It clarifies that a \"company\" or \"association\" includes successors and assigns, ensuring continuity of obligations and rights across reorganizations and transfers.\nThe material also narrows the scope of certain terms to reflect policy preferences. For example, it narrows the meaning of \"products of American fisheries\" by excluding seafood produced abroad with nonresident labor. It provides a federal framework for recognizing marriages between two individuals based on the jurisdiction and validity at formation, with an expanded definition of \"State\" to include territories. When evaluating a foreign marriage, only the law applicable at the time of the marriage is considered.\nFinally, the provisions define birth in a way that ensures born-alive infants are treated as persons for federal purposes, while preserving existing legal statuses for individuals not meeting the definition. This definition centers on the infant's emergence and any subsequent signs of life, such as breathing or a heartbeat, without altering pre-birth legal rights."
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "title": "TITLE 1, CHAPTER 1",
+        "long_title": "TITLE 1-- GENERAL PROVISIONS, CHAPTER 1-- RULES OF CONSTRUCTION",
+        "content_scope": [
+            {
+                "title": "1"
+            },
+            {
+                "chapter": "1"
+            }
+        ],
+        "processing_status": {
+            "parsed": true,
+            "stage_2_complete": true,
+            "stage_2_progress": {
+                "total_items": 8,
+                "processed_items": 8,
+                "current_phase": "processing",
+                "last_updated": "2026-03-11T05:15:17.737627+00:00"
+            },
+            "stage_3_complete": true,
+            "stage_3_progress": {
+                "operational": {
+                    "total": 8,
+                    "summary_1": 8,
+                    "summary_2": 8
+                },
+                "organizational": {
+                    "total": 1,
+                    "summary_2": 1
+                },
+                "last_updated": "2026-03-11T05:15:18.485553+00:00"
+            },
+            "checkpoint_state": {
+                "stage": null,
+                "last_processed_item": null,
+                "checkpoint_threshold": 30,
+                "items_since_checkpoint": 0
+            }
+        },
+        "document_definitions": [
+            {
+                "term": "person",
+                "value": "the words \"person\" and \"whoever\" include corporations, companies, associations, firms, partnerships, societies, and joint stock companies, as well as individuals;",
+                "source_type": "section",
+                "source_number": "1",
+                "def_kind": "elaboration",
+                "scope": "In determining the meaning of any Act of Congress, unless the context indicates otherwise",
+                "quality_checked": true
+            },
+            {
+                "term": "whoever",
+                "value": "the words \"person\" and \"whoever\" include corporations, companies, associations, firms, partnerships, societies, and joint stock companies, as well as individuals;",
+                "source_type": "section",
+                "source_number": "1",
+                "def_kind": "elaboration",
+                "scope": "In determining the meaning of any Act of Congress, unless the context indicates otherwise--",
+                "quality_checked": true
+            },
+            {
+                "term": "oath",
+                "value": "\"oath\" includes affirmation",
+                "source_type": "section",
+                "source_number": "1",
+                "def_kind": "elaboration",
+                "scope": "In determining the meaning of any Act of Congress, unless the context indicates otherwise",
+                "quality_checked": true
+            },
+            {
+                "term": "county",
+                "value": "The word \"county\" includes a parish, or any other equivalent subdivision of a State or Territory of the United States.",
+                "source_type": "section",
+                "source_number": "2",
+                "def_kind": "elaboration",
+                "scope": "",
+                "quality_checked": true
+            },
+            {
+                "term": "vessel",
+                "value": "The word \"vessel\" includes every description of watercraft or other artificial contrivance used, or capable of being used, as a means of transportation on water.",
+                "source_type": "section",
+                "source_number": "3",
+                "def_kind": "elaboration",
+                "scope": "",
+                "quality_checked": true
+            },
+            {
+                "term": "vehicle",
+                "value": "The word \"vehicle\" includes every description of carriage or other artificial contrivance used, or capable of being used, as a means of transportation on land.",
+                "source_type": "section",
+                "source_number": "4",
+                "def_kind": "direct",
+                "scope": "",
+                "quality_checked": true
+            },
+            {
+                "term": "company",
+                "value": "The word \"company\" or \"association\", when used in reference to a corporation, shall be deemed to embrace the words \"successors and assigns of such company or association\", in like manner as if these last-named words, or words of similar import, were expressed.",
+                "source_type": "section",
+                "source_number": "5",
+                "def_kind": "elaboration",
+                "scope": "when used in reference to a corporation",
+                "quality_checked": true
+            },
+            {
+                "term": "association",
+                "value": "The word \"company\" or \"association\", when used in reference to a corporation, shall be deemed to embrace the words \"successors and assigns of such company or association\", in like manner as if these last-named words, or words of similar import, were expressed.",
+                "source_type": "section",
+                "source_number": "5",
+                "def_kind": "elaboration",
+                "scope": "when used in reference to a corporation",
+                "quality_checked": true
+            }
+        ],
+        "topic_statement": "Statutory rules of construction, defined terms and interpretive scope (person, company, officer, signature, oath, writing), jurisdictional definitions (State/territories, counties/parishes), conveyances and commerce (vessels, vehicles, fisheries products), marriage recognition standards, born-alive infant personhood definition"
+    },
+    "content": {
+        "sections": {
+            "1": {
+                "text": "In determining the meaning of any Act of Congress, unless the context indicates otherwise--\nwords importing the singular include and apply to several persons, parties, or things;words importing the plural include the singular;words importing the masculine gender include the feminine as well;words used in the present tense include the future as well as the present;the words \"insane\" and \"insane person\" shall include every idiot, insane person, and person non compos mentis;the words \"person\" and \"whoever\" include corporations, companies, associations, firms, partnerships, societies, and joint stock companies, as well as individuals;\"officer\" includes any person authorized by law to perform the duties of the office;\"signature\" or \"subscription\" includes a mark when the person making the same intended it as such;\"oath\" includes affirmation, and \"sworn\" includes affirmed;\"writing\" includes printing and typewriting and reproductions of visual symbols by photographing, multigraphing, mimeographing, manifolding, or otherwise.\n",
+                "breakpoints": [],
+                "notes": {},
+                "unit_title": "Words denoting number, gender, and so forth",
+                "context": [
+                    {
+                        "title": "1"
+                    },
+                    {
+                        "chapter": "1"
+                    }
+                ],
+                "defined_terms": [],
+                "summary_1": "These rules set out how to interpret terms in Acts of Congress, including that singular terms apply to multiple persons or things and plural terms include a single individual. They further state that masculine terms include the feminine, and present-tense terms cover both the present and the future. The section also broadens defined terms to include concepts like 'insane' (covering idiots and non compos mentis), 'person' (including corporations and other entities), 'officer' (any person authorized to perform duties), and that 'signature', 'oath', and 'writing' include marks, affirmations, and various forms of reproduction.",
+                "need_ref": [
+                    {
+                        "type": "Section",
+                        "value": "1"
+                    }
+                ],
+                "summary_2": "When interpreting Acts, terms are broad and context governs: singular terms can apply to multiple persons or things; plural terms can apply to a single person; masculine terms include the feminine; and present-tense terms include the future as well as the present.\n- The words \"insane\" and \"insane person\" cover idiot, insane person, and person non compos mentis.\n- The terms \"person\" and \"whoever\" include corporations, companies, associations, firms, partnerships, societies, joint stock companies, and other entities, not just individuals.\n- Other defined terms: \"officer\" includes any person authorized by law to perform duties; \"signature\" or \"subscription\" includes a mark when that was intended; \"oath\" includes affirmation and \"sworn\" includes affirmed; \"writing\" includes printing, typewriting, and reproductions of visual symbols by various reproduction methods."
+            },
+            "2": {
+                "text": "The word \"county\" includes a parish, or any other equivalent subdivision of a State or Territory of the United States.\n",
+                "breakpoints": [],
+                "notes": {},
+                "unit_title": "\"County\" as including \"parish\", and so forth",
+                "context": [
+                    {
+                        "title": "1"
+                    },
+                    {
+                        "chapter": "1"
+                    }
+                ],
+                "defined_terms": [],
+                "summary_1": "The term 'county' is broadened to include parishes and other equivalent subdivisions of a State or Territory of the United States. This ensures that references to counties apply to these analogous political divisions within the United States. The language promotes consistency in jurisdictional references across diverse local government structures.",
+                "need_ref": [
+                    {
+                        "type": "Section",
+                        "value": "2"
+                    }
+                ],
+                "summary_2": "For purposes of this regulation, \"county\" includes a parish or any other equivalent subdivision of a state or territory, so such entities are treated as counties."
+            },
+            "3": {
+                "text": "The word \"vessel\" includes every description of watercraft or other artificial contrivance used, or capable of being used, as a means of transportation on water.\n",
+                "breakpoints": [],
+                "notes": {},
+                "unit_title": "\"Vessel\" as including all means of water transportation",
+                "context": [
+                    {
+                        "title": "1"
+                    },
+                    {
+                        "chapter": "1"
+                    }
+                ],
+                "defined_terms": [],
+                "summary_1": "Defines 'Vessel' to include every description of watercraft or other artificial contrivance used, or capable of being used, as a means of transportation on water. This broad scope captures both existing waterborne conveyances and devices capable of being used for water transport. The language ensures regulatory treatment applies to a wide range of water transportation means.",
+                "need_ref": [
+                    {
+                        "type": "Section",
+                        "value": "3"
+                    }
+                ],
+                "summary_2": "Section 3 broadens the term \"vessel\" to include all watercraft and any artificial contrivance used, or capable of being used, as a means of water transportation, ensuring the regulation covers a wide range of devices."
+            },
+            "4": {
+                "text": "The word \"vehicle\" includes every description of carriage or other artificial contrivance used, or capable of being used, as a means of transportation on land.\n",
+                "breakpoints": [],
+                "notes": {},
+                "unit_title": "\"Vehicle\" as including all means of land transportation",
+                "context": [
+                    {
+                        "title": "1"
+                    },
+                    {
+                        "chapter": "1"
+                    }
+                ],
+                "defined_terms": [],
+                "summary_1": "Defines 'Vehicle' to include every description of carriage or other artificial contrivance used, or capable of being used, as a means of transportation on land. This broad definition ensures all land-based transportation devices fall within regulatory scope.",
+                "need_ref": [
+                    {
+                        "type": "Section",
+                        "value": "4"
+                    }
+                ],
+                "summary_2": "This defines 'vehicle' to include any land-based carriage or artificial device used, or able to be used, for transport on land."
+            },
+            "5": {
+                "text": "The word \"company\" or \"association\", when used in reference to a corporation, shall be deemed to embrace the words \"successors and assigns of such company or association\", in like manner as if these last-named words, or words of similar import, were expressed.\n",
+                "breakpoints": [],
+                "notes": {},
+                "unit_title": "\"Company\" or \"association\" as including successors and assigns",
+                "context": [
+                    {
+                        "title": "1"
+                    },
+                    {
+                        "chapter": "1"
+                    }
+                ],
+                "defined_terms": [],
+                "summary_1": "This provision treats 'company' or 'association' as including its successors and assigns, so that contracts and duties bind the entity's legal continuations as if they were explicitly named. It ensures that the rights and obligations attach to future successors of the corporation and to entities that acquire it. This clarifies that changes in corporate structure do not extinguish or alter existing duties under the referenced terms.",
+                "need_ref": [
+                    {
+                        "type": "Section",
+                        "value": "5"
+                    }
+                ],
+                "summary_2": "This provision interprets the terms \"company\" or \"association\" to include the organization's successors and assigns. Consequently, all rights and obligations that apply to the company or association also bind and pass to its successors and assigns, as if the words \"successors and assigns\" were expressly stated. This ensures continuity of the entity's legal duties and entitlements across transfers, mergers, or other changes in organization or control."
+            },
+            "6": {
+                "text": "Wherever, in the statutes of the United States or in the rulings, regulations, or interpretations of various administrative bureaus and agencies of the United States there appears or may appear the term \"products of American fisheries\" said term shall not include fresh or frozen fish fillets, fresh or frozen fish steaks, or fresh or frozen slices of fish substantially free of bone (including any of the foregoing divided into sections), produced in a foreign country or its territorial waters, in whole or in part with the use of the labor of persons who are not residents of the United States.\n",
+                "breakpoints": [],
+                "notes": {},
+                "unit_title": "Limitation of term \"products of American fisheries\"",
+                "context": [
+                    {
+                        "title": "1"
+                    },
+                    {
+                        "chapter": "1"
+                    }
+                ],
+                "defined_terms": [],
+                "summary_1": "This section narrows the scope of the term 'products of American fisheries' by excluding certain foreign-produced fish products based on where they are made and who labors on them. Specifically, fresh or frozen fish fillets, steaks, or bone-free slices produced in a foreign country or its territorial waters using labor by non-residents are not to be treated as 'products of American fisheries' in statutes or agency rulings, regulations, or interpretations. The limitation applies across references to the term in U.S. law.",
+                "need_ref": [
+                    {
+                        "type": "Section",
+                        "value": "6"
+                    }
+                ],
+                "summary_2": "This section narrows the meaning of \"products of American fisheries\" as used in U.S. statutes and agency rules. It provides that the term excludes certain seafood items produced abroad or in foreign waters with labor performed by non-U.S. residents.\nSpecifically, fresh or frozen fish fillets, steaks, or bone-free slices (even if divided), produced wholly or in part in a foreign country or its territorial waters using nonresident labor, are not considered \"products of American fisheries\" for purposes where the designation applies, across statutes and regulations."
+            },
+            "7": {
+                "text": "    (a) For the purposes of any Federal law, rule, or regulation in which marital status is a factor, an individual shall be considered married if that individual's marriage is between 2 individuals and is valid in the State where the marriage was entered into or, in the case of a marriage entered into outside any State, if the marriage is between 2 individuals and is valid in the place where entered into and the marriage could have been entered into in a State.\n    (b) In this section, the term \"State\" means a State, the District of Columbia, the Commonwealth of Puerto Rico, or any other territory or possession of the United States.\n    (c) For purposes of subsection (a), in determining whether a marriage is valid in a State or the place where entered into, if outside of any State, only the law of the jurisdiction applicable at the time the marriage was entered into may be considered.\n",
+                "breakpoints": [
+                    [
+                        467,
+                        1
+                    ],
+                    [
+                        642,
+                        1
+                    ]
+                ],
+                "notes": {},
+                "unit_title": "Marriage",
+                "context": [
+                    {
+                        "title": "1"
+                    },
+                    {
+                        "chapter": "1"
+                    }
+                ],
+                "defined_terms": [
+                    {
+                        "term": "State",
+                        "value": "In this section, the term \"State\" means a State, the District of Columbia, the Commonwealth of Puerto Rico, or any other territory or possession of the United States.",
+                        "indirect": "",
+                        "scope": "In this section",
+                        "def_kind": "direct",
+                        "source_type": "section",
+                        "source_number": "7",
+                        "scope_processed": true,
+                        "quality_checked": true
+                    }
+                ],
+                "summary_1": "A marriage is recognized for federal purposes if it is between two individuals and valid where entered, or valid where entered if entered outside a state and could have been entered in a state. The term 'State' includes a State, the District of Columbia, Puerto Rico, or any other U.S. territory or possession. When determining validity for out-of-state marriages, only the law of the jurisdiction applicable at the time the marriage was entered may be considered.",
+                "need_ref": [
+                    {
+                        "type": "Section",
+                        "value": "7"
+                    }
+                ],
+                "summary_2": "The provision treats a marriage as valid for federal purposes if it is between two individuals and valid where it was entered into, or, if the marriage occurred outside any State, valid in the place of celebration and capable of having been entered into in a State. This creates federal recognition based on the jurisdiction and validity at the time of formation, with a focus on two-person marriages.\nThe term \"State\" for these purposes includes not only the States but also the District of Columbia, Puerto Rico, and any other U.S. territory or possession, expanding recognition beyond the fifty states.\nWhen evaluating the validity of a marriage performed outside a State, only the law of the jurisdiction applicable at the time the marriage was entered into may be considered, limiting the legal analysis to the contemporaneous rules governing that marriage."
+            },
+            "8": {
+                "text": "    (a) In determining the meaning of any Act of Congress, or of any ruling, regulation, or interpretation of the various administrative bureaus and agencies of the United States, the words \"person\", \"human being\", \"child\", and \"individual\", shall include every infant member of the species homo sapiens who is born alive at any stage of development.\n    (b) As used in this section, the term \"born alive\", with respect to a member of the species homo sapiens, means the complete expulsion or extraction from his or her mother of that member, at any stage of development, who after such expulsion or extraction breathes or has a beating heart, pulsation of the umbilical cord, or definite movement of voluntary muscles, regardless of whether the umbilical cord has been cut, and regardless of whether the expulsion or extraction occurs as a result of natural or induced labor, cesarean section, or induced abortion.\n    (c) Nothing in this section shall be construed to affirm, deny, expand, or contract any legal status or legal right applicable to any member of the species homo sapiens at any point prior to being \"born alive\" as defined in this section.\n",
+                "breakpoints": [
+                    [
+                        351,
+                        1
+                    ],
+                    [
+                        916,
+                        1
+                    ]
+                ],
+                "notes": {},
+                "unit_title": "\"Person\", \"human being\", \"child\", and \"individual\" as including born-alive infant",
+                "context": [
+                    {
+                        "title": "1"
+                    },
+                    {
+                        "chapter": "1"
+                    }
+                ],
+                "defined_terms": [
+                    {
+                        "term": "born alive",
+                        "value": "As used in this section, the term \"born alive\", with respect to a member of the species homo sapiens, means the complete expulsion or extraction from his or her mother of that member, at any stage of development, who after such expulsion or extraction breathes or has a beating heart, pulsation of the umbilical cord, or definite movement of voluntary muscles, regardless of whether the umbilical cord has been cut, and regardless of whether the expulsion or extraction occurs as a result of natural or induced labor, cesarean section, or induced abortion.",
+                        "indirect": "",
+                        "scope": "As used in this section",
+                        "def_kind": "direct",
+                        "source_type": "section",
+                        "source_number": "8",
+                        "scope_processed": true,
+                        "quality_checked": true
+                    }
+                ],
+                "summary_1": "It broadens the meaning of 'person', 'human being', 'child', and 'individual' to include every born-alive infant at any development stage. It defines 'born alive' as the complete expulsion or extraction from the mother of such an infant who, after expulsion or extraction, breathes or has a beating heart, pulsation of the umbilical cord, or definite movement of voluntary muscles, regardless of whether the umbilical cord has been cut or the delivery method. It states that nothing in this section shall be construed to affirm, deny, expand, or contract any legal status or rights of a member of the species homo sapiens prior to being 'born alive' as defined herein.",
+                "need_ref": [
+                    {
+                        "type": "Section",
+                        "value": "8"
+                    }
+                ],
+                "summary_2": "The provision expands the meaning of terms such as \"person,\" \"human being,\" \"child,\" and \"individual\" to include every infant born alive, ensuring that born-alive infants are treated as persons for purposes of any Act of Congress or agency rulings, regulations, or interpretations.\n\"Born alive\" is defined as the complete expulsion or extraction of the infant from the mother at any stage of development, who afterward breathes or has a beating heart, umbilical cord pulsation, or definite voluntary muscle movement, regardless of whether the umbilical cord is cut and regardless of whether the expulsion results from natural or induced labor, cesarean section, or induced abortion.\nNothing in this section shall be construed to affirm, deny, expand, or contract any legal status or legal right applicable to any member of the species homo sapiens prior to being \"born alive\" as defined, preserving existing legal status for individuals who do not meet the definition."
+            }
+        }
+    }
+}

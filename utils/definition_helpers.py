@@ -261,6 +261,13 @@ def find_organizational_unit_path(parsed_content, element_type, element_designat
                 # Found it! Return the path
                 new_path = path_so_far + [{target_type: target_designation}]
                 return new_path
+            else:
+                # Case-insensitive fallback within this unit type only
+                target_lower = target_designation.lower()
+                for stored_key in current_level[target_type].keys():
+                    if stored_key.lower() == target_lower:
+                        new_path = path_so_far + [{target_type: stored_key}]
+                        return new_path
         
         # Recursively search sub-levels
         for level_name in current_level.keys():

@@ -1,0 +1,15 @@
+{
+  "_note": "Article 3 of the EU AI Act as parsed from Formex XML. The Formex parser strips QUOT.START/QUOT.END typographic markers, normalizes list structure, and produces a clean text field. The 65 numbered definitions become a single text block; defined terms are extracted in Stage 2.",
+
+  "3": {
+    "unit_title": "Definitions",
+    "text": "For the purposes of this Regulation, the following definitions apply:\n(1) 'AI system' means a machine-based system that is designed to operate with varying levels of autonomy and that may exhibit adaptiveness after deployment, and that, for explicit or implicit objectives, infers, from the input it receives, how to generate outputs such as predictions, content, recommendations, or decisions that can influence physical or virtual environments;\n(2) 'risk' means the combination of the probability of an occurrence of harm and the severity of that harm;\n(3) 'provider' means a natural or legal person, public authority, agency or other body that develops an AI system or a general-purpose AI model or that has an AI system or a general-purpose AI model developed and places it on the market or puts the AI system into service under its own name or trademark, whether for payment or free of charge;\n... [65 definitions total]",
+    "context": [
+      { "regulation": "(EU) 2024/1689 of the European Parliament and of the Council" },
+      { "chapter": "I" }
+    ],
+    "breakpoints": [],
+    "notes": {},
+    "defined_terms": []
+  }
+}

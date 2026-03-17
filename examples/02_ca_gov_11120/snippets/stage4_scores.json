@@ -1,0 +1,64 @@
+{
+  "_question": "Can the State Bar of California hold public meetings that require attendees to sign in?",
+  "_note": "Score distribution across all 43 sections. Score range 0-5. Unlike the USC Title 1 example (where only 2 of 8 sections scored > 0), this 43-section document produces a broader relevance spread — expected for a question about a document whose entire purpose is open-meeting rules.",
+
+  "scores": {
+    "11120": 2,
+    "11121": 3,
+    "11121.1": 1,
+    "11121.9": 0,
+    "11121.95": 0,
+    "11122": 1,
+    "11122.5": 1,
+    "11123": 3,
+    "11123.1": 2,
+    "11123.2": 1,
+    "11123.5": 1,
+    "11124": 3,
+    "11124.1": 1,
+    "11125": 2,
+    "11125.1": 1,
+    "11125.2": 0,
+    "11125.3": 0,
+    "11125.4": 0,
+    "11125.5": 0,
+    "11125.6": 0,
+    "11125.7": 3,
+    "11125.8": 0,
+    "11125.9": 1,
+    "11126": 1,
+    "11126.1": 0,
+    "11126.2": 0,
+    "11126.3": 1,
+    "11126.4": 0,
+    "11126.4.5": 0,
+    "11126.5": 2,
+    "11126.7": 0,
+    "11127": 3,
+    "11128": 1,
+    "11128.5": 1,
+    "11129": 1,
+    "11130": 1,
+    "11130.3": 2,
+    "11130.5": 1,
+    "11130.7": 0,
+    "11131": 3,
+    "11131.5": 0,
+    "11132": 2
+  },
+
+  "_interpretation": {
+    "score_3": "11121 (state body definition — is State Bar covered?), 11123 (open meetings requirement), 11124 (no mandatory sign-in — directly answers question), 11125.7 (recording at meetings), 11127 (quorum), 11131 (nondiscrimination in facility admittance)",
+    "score_2": "11120 (purpose/intent), 11123.1, 11125, 11126.5, 11130.3, 11132",
+    "score_0": "Teleconference-specific sections (11125.2-11125.6), closed-session procedures (11126.1-11126.4.5), and administrative details not relevant to sign-in question"
+  },
+
+  "_performance": {
+    "analysis_iterations_completed": 3,
+    "qa_mode": "standard",
+    "complete": true,
+    "facts_collected": 3,
+    "open_questions": 1,
+    "section_requests_filed": 1
+  }
+}

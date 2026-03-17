@@ -1,0 +1,128 @@
+{
+    "question": {
+        "text": "Can the State Bar of California hold public meetings that require attendees to sign in?"
+    },
+    "scores": {
+        "1": {
+            "11120": 2,
+            "11121": 3,
+            "11121.1": 1,
+            "11121.9": 0,
+            "11121.95": 0,
+            "11122": 1,
+            "11122.5": 1,
+            "11123": 3,
+            "11123.1": 2,
+            "11123.2": 1,
+            "11123.5": 1,
+            "11123.5_dup": 1,
+            "11124": 3,
+            "11124.1": 1,
+            "11125": 2,
+            "11125.1": 1,
+            "11125.2": 0,
+            "11125.3": 0,
+            "11125.4": 0,
+            "11125.5": 0,
+            "11125.6": 0,
+            "11125.7": 3,
+            "11125.8": 0,
+            "11125.9": 1,
+            "11126": 1,
+            "11126.1": 0,
+            "11126.2": 0,
+            "11126.3": 1,
+            "11126.4": 0,
+            "11126.4.5": 0,
+            "11126.5": 2,
+            "11126.7": 0,
+            "11127": 3,
+            "11128": 1,
+            "11128.5": 1,
+            "11129": 1,
+            "11130": 1,
+            "11130.3": 2,
+            "11130.5": 1,
+            "11130.7": 1,
+            "11131": 3,
+            "11131.5": 0,
+            "11132": 2
+        }
+    },
+    "scratch": {
+        "fact": {
+            "fact_001": {
+                "content": "The State Bar of California is expressly included as a “state body” for purposes of this open-meeting article (operative April 1, 2016).",
+                "source": [
+                    "Section 11121"
+                ]
+            },
+            "fact_002": {
+                "content": "All meetings of a state body must be open and public, and all persons must be permitted to attend any meeting except as otherwise provided in the article.",
+                "source": [
+                    "Section 11123"
+                ]
+            },
+            "fact_003": {
+                "content": "A state body may not require any person, as a condition of attending a meeting, to register their name, provide other information, complete a questionnaire, or fulfill any other condition precedent to attendance. However, an attendance list/register/questionnaire may be posted or circulated only if it clearly states participation is voluntary and that all persons may attend regardless of whether they sign/register/complete it. For teleconferenced meetings using an internet website/online platform that requires information to log in, the attendee must be permitted to use a pseudonym or other anonymous information.",
+                "source": [
+                    "Section 11124"
+                ]
+            }
+        },
+        "question": {
+            "question_002": {
+                "content": "What characteristics are \"listed or defined\" in Section 11135 (as incorporated by Section 11131’s nondiscrimination rule on facility admittance)?",
+                "source": [
+                    "Section 11131"
+                ],
+                "importance": 1,
+                "answers": {
+                    "answer_001": {
+                        "content": "Section 11131 references “any characteristic listed or defined in Section 11135” but does not itself list those characteristics; the specifics depend on Section 11135.",
+                        "source": [
+                            "Section 11131"
+                        ]
+                    }
+                }
+            }
+        },
+        "requests": {
+            "request_002": {
+                "action": "request_relevant_section",
+                "target_type": "Section",
+                "target_number": "11135",
+                "source": [
+                    "Section 11131"
+                ]
+            }
+        }
+    },
+    "working_answer": {
+        "text": "No—if attendance is conditioned on signing in, the State Bar of California generally cannot do that for its public meetings.\n\n- The State Bar of California is expressly treated as a “state body” for purposes of the open-meeting requirements. (Section 11121)  \n- As a state body, its meetings must be “open and public,” and “all persons” must be permitted to attend unless a specific exception applies. (Section 11123)  \n- A state body **may not require**, as a condition of attending a meeting, that a person **register their name**, provide other information, complete a questionnaire, or satisfy any other condition precedent to attendance. (Section 11124)  \n\n### What is allowed\n- The State Bar may **post or circulate** an attendance list/sign-in sheet **only if** it clearly states that participation is **voluntary** and that **everyone may attend whether or not they sign/complete it**. (Section 11124)  \n- For teleconferenced/online meetings where the platform requires information to log in, the attendee must be allowed to use a **pseudonym or other anonymous information**. (Section 11124)\n\n### Limits/uncertainties based on the provided text\n- The materials provided do not include any exceptions that might allow mandatory sign-in in particular circumstances; Section 11123 notes exceptions may exist “as otherwise provided in the article,” but no specific exception language is included here. (Section 11123)"
+    },
+    "skip_list": [
+        "section_11124",
+        "section_11127",
+        "section_11120",
+        "section_11121",
+        "section_11123",
+        "section_11125.7",
+        "section_11131",
+        "section_11123.1",
+        "section_11125",
+        "section_11126.5",
+        "section_11130.3",
+        "section_11132"
+    ],
+    "progress": {
+        "scoring_complete": true,
+        "analysis_iterations_completed": 3,
+        "cleanup_complete": true,
+        "quality_check_complete": false,
+        "final_answer_complete": true
+    },
+    "cross_doc_scores": {},
+    "complete": true,
+    "qa_mode": "standard"
+}

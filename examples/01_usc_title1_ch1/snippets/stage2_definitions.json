@@ -1,0 +1,33 @@
+{
+  "_note": "Defined terms extracted during Stage 2. These are attached to the section in which they appear and carry scope metadata that controls which other sections receive them as context during Stage 3 summarization and Stage 4 analysis.",
+
+  "section_7_definitions": [
+    {
+      "term": "State",
+      "value": "In this section, the term \"State\" means a State, the District of Columbia, the Commonwealth of Puerto Rico, or any other territory or possession of the United States.",
+      "indirect": "",
+      "scope": "In this section",
+      "def_kind": "direct",
+      "source_type": "section",
+      "source_number": "7",
+      "scope_processed": true,
+      "quality_checked": true
+    }
+  ],
+
+  "section_8_definitions": [
+    {
+      "term": "born alive",
+      "value": "As used in this section, the term \"born alive\", with respect to a member of the species homo sapiens, means the complete expulsion or extraction from his or her mother of that member, at any stage of development, who after such expulsion or extraction breathes or has a beating heart, pulsation of the umbilical cord, or definite movement of voluntary muscles, regardless of whether the umbilical cord has been cut, and regardless of whether the expulsion or extraction occurs as a result of natural or induced labor, cesarean section, or induced abortion.",
+      "indirect": "",
+      "scope": "As used in this section",
+      "def_kind": "direct",
+      "source_type": "section",
+      "source_number": "8",
+      "scope_processed": true,
+      "quality_checked": true
+    }
+  ],
+
+  "_elaborative_note": "Sections 1-6 contain elaborative definitions embedded in their text (e.g., 'the word county includes a parish', 'the terms person and whoever include corporations'). These are noted by Stage 2 but do not produce standalone definition records because the section text itself IS the definition — it broadens a term rather than declaring a bounded meaning."
+}
