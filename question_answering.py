@@ -2728,7 +2728,7 @@ class QuestionProcessor:
                 item_type_name = p["name"]
                 item_type_names = p["name_plural"]
 
-                for item_num, score in type_scores.items():
+                for item_num, score in list(type_scores.items()):
                     if score != score_level:
                         continue
                     working_item = lookup_item(self.parsed_content, item_type_names, item_num)
