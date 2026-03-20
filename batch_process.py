@@ -109,7 +109,7 @@ class BatchResults:
 
 def discover_parsed_files(directory: str) -> List[str]:
     """
-    Discover all *_parse_output.json files in directory.
+    Discover all *_parse_output.json files in directory (recursively).
 
     Args:
         directory: Path to directory to scan
@@ -117,19 +117,13 @@ def discover_parsed_files(directory: str) -> List[str]:
     Returns:
         List of paths to parse output JSON files
     """
-    parsed_files = []
+    from pathlib import Path
 
     if not os.path.isdir(directory):
         print(f"Error: '{directory}' is not a directory")
         return []
 
-    # Look for files ending with _parse_output.json
-    for filename in os.listdir(directory):
-        if filename.endswith('_parse_output.json'):
-            file_path = os.path.join(directory, filename)
-            parsed_files.append(file_path)
-
-    return sorted(parsed_files)
+    return sorted(str(p) for p in Path(directory).rglob('*_parse_output.json'))
 
 
 def check_file_status(parsed_file: str) -> Tuple[bool, bool, str]:

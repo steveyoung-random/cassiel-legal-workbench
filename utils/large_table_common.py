@@ -78,6 +78,53 @@ def find_or_create_table_param_key(param_pointer: Dict[str, Any]) -> int:
     return next_key
 
 
+def assign_method_section_key(hd1_text: str, local_num: int, taken: Set[str]) -> str:
+    """
+    Return a globally unique sub-unit key for a method-section sub-unit.
+
+    Primary: the method/procedure number extracted from the HD1 heading text,
+    e.g. "301" from "Method 301—Field Validation..." or "2G" from "Method 2G—...".
+    Fallback: if that key is already taken (rare — different appendices share number
+    ranges in practice), append a numeric suffix until unique.
+    """
+    import re
+    m = re.match(
+        r'^(?:Method|Performance Specification|Procedure)\s+(\d+[A-Za-z]*)',
+        hd1_text, re.IGNORECASE
+    )
+    base = m.group(1) if m else str(local_num)
+    if base not in taken:
+        return base
+    suffix = 2
+    while f"{base}_{suffix}" in taken:
+        suffix += 1
+    return f"{base}_{suffix}"
+
+
+def find_or_create_method_section_param_key(param_pointer: Dict[str, Any]) -> int:
+    """
+    Find the parameter key for the method-section sub-unit type, creating it if absent.
+
+    Identified by method_section: 1 + is_sub_unit: True.
+    Allocates the next available integer key and registers the parameter entry
+    with name 'method_section' / 'method_sections'.
+    Returns the integer key.
+    """
+    for key, p in param_pointer.items():
+        if p.get('method_section') and p.get('is_sub_unit'):
+            return int(key) if isinstance(key, str) else key
+    int_keys = [k for k in param_pointer if isinstance(k, int)]
+    next_key = max(int_keys) + 1 if int_keys else 10
+    param_pointer[next_key] = {
+        "name": "method_section",
+        "name_plural": "method_sections",
+        "operational": 1,
+        "is_sub_unit": True,
+        "method_section": 1,
+    }
+    return next_key
+
+
 def build_table_sub_unit_from_html(
     html_str: str,
     row_count: int,

@@ -135,6 +135,10 @@ python question_answering.py /path/to/file.html /path/to/question.txt
 
 See `config.json` for mode configuration options and `DEVELOPER_GUIDE.md` for technical details.
 
+## Keeping the Corpus Up to Date
+
+When source documents are periodically updated, the system supports efficient corpus refresh: re-parse everything (fast, no AI calls), detect which documents changed, archive old processed files for changed documents, and re-run Stages 2/3. The API call cache returns cached results for unchanged units instantly, so only genuinely changed content generates new AI calls. See [CORPUS_MAINTENANCE.md](CORPUS_MAINTENANCE.md) for the full workflow.
+
 ## Processing Pipeline Overview
 
 All four processing stages are fully working:

@@ -68,6 +68,20 @@ PATTERN_CHECKS = [
         "HTML table subdivision (group by first-column value)",
         50,
     ),
+    (
+        "Multi-method HD1 sections (Method NNN)",
+        re.compile(r'##HD1## Method \d+', re.IGNORECASE),
+        "method_section",
+        "HD1-based subdivision (split at each 'Method NNN' boundary) — already handled by parser",
+        2,
+    ),
+    (
+        "Multi-item HD1 sections (Performance Specification / Procedure NNN)",
+        re.compile(r'##HD1## (?:Performance Specification|Procedure) \d+', re.IGNORECASE),
+        "method_section",
+        "HD1-based subdivision (split at each named-item boundary) — already handled by parser",
+        2,
+    ),
 ]
 
 

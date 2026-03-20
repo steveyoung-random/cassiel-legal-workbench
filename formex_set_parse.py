@@ -837,6 +837,7 @@ def process_file(input_file_path, config):
         parser='formex_set_parse.py',
         parser_type='formex'
     )
+    manifest_mgr.update_source_hash(manifest, input_file_path)
 
     # Output file path
     output_filename = f'{file_stem}_parse_output.json'

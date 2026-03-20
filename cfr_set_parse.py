@@ -25,7 +25,9 @@ from utils import clean_text, canonical_org_types, LARGE_TABLE_ROW_THRESHOLD
 from utils.error_handling import ParseError, log_parsing_correction
 from utils.config import get_config, get_output_directory, get_output_structure
 from utils.manifest_utils import ManifestManager, get_manifest_path, parse_filter_string, create_title_output_dir
-from utils.large_table_common import assign_table_key, find_or_create_table_param_key
+from utils.large_table_common import (assign_table_key, find_or_create_table_param_key,
+                                      assign_method_section_key,
+                                      find_or_create_method_section_param_key)
 
 
 # Unicode fraction mapping for common fractions
@@ -602,6 +604,9 @@ def parse_section(
     text_parts: List[str] = []
     annotation_parts: List[str] = []
     notes = extract_footnotes(section_elem)
+    # Large XML table elements intercepted during text assembly; converted to
+    # sub-units after the entry is assembled (mirrors parse_appendix logic).
+    pending_large_tables: List[ET.Element] = []
 
     # Process child elements
     for child in list(section_elem):
@@ -671,7 +676,7 @@ def parse_section(
             continue
         elif tag.startswith('DIV'):
             # Nested DIV elements may contain tables and other content
-            nested_parts = extract_nested_div_content(child)
+            nested_parts = extract_nested_div_content(child, pending_large_tables)
             text_parts.extend(nested_parts)
         elif tag in ('AUTH', 'SOURCE'):
             # Authority and source at section level - ignore
@@ -697,10 +702,16 @@ def parse_section(
             if math_text:
                 text_parts.append(math_text)
         elif tag == 'GPOTABLE' or tag == 'TABLE':
-            # Tables - extract text content
-            table_text = extract_table_text(child)
-            if table_text:
-                text_parts.append(table_text)
+            xml_row_count = _count_xml_table_rows(child)
+            if xml_row_count >= LARGE_TABLE_ROW_THRESHOLD:
+                # Large table: collect for sub-unit extraction; add placeholder.
+                pending_large_tables.append(child)
+                local_num = len(pending_large_tables)
+                text_parts.append(f"[Table {local_num} pending sub-unit extraction]")
+            else:
+                table_text = extract_table_text(child)
+                if table_text:
+                    text_parts.append(table_text)
         # List items - each on own line
         elif tag == 'LI':
             para = extract_paragraph_text(child)
@@ -725,6 +736,36 @@ def parse_section(
             # Image element - insert placeholder
             text_parts.append("[Image omitted]")
 
+    # Resolve the final section_id before key assignment so that table sub-unit
+    # keys derive from the deduped container ID rather than the raw parse value.
+    section_name_plural = content["document_information"]["parameters"][1]["name_plural"]
+    section_name = content["document_information"]["parameters"][1]["name"]
+    section_id = ensure_unique_id(content["content"][section_name_plural], section_id, parsing_logfile, "section")
+
+    # If large tables were intercepted, assign their final sub-unit keys now —
+    # before assembly — so that assembled breakpoint offsets match the final text.
+    # Replacing in the assembled string would shift offsets and invalidate breakpoints.
+    table_sub_unit_keys: List[str] = []
+    table_param_key: Optional[int] = None
+    table_type_name: str = ''
+    table_key_str: str = ''
+    if pending_large_tables:
+        _param_ptr = content["document_information"]["parameters"]
+        table_param_key = find_or_create_table_param_key(_param_ptr)
+        table_type_name = _param_ptr[table_param_key]['name']
+        table_key_str = str(table_param_key)
+        _di = content["document_information"]
+        _di.setdefault("sub_unit_index", {})
+        _di["sub_unit_index"].setdefault(table_key_str, {})
+        _taken: set = set(_di["sub_unit_index"][table_key_str].keys())
+        for local_num in range(1, len(pending_large_tables) + 1):
+            sub_unit_key = assign_table_key(local_num, section_id, _taken)
+            _taken.add(sub_unit_key)
+            table_sub_unit_keys.append(sub_unit_key)
+            old_ph = f"[Table {local_num} pending sub-unit extraction]"
+            new_ph = f"[Table {local_num} extracted as sub-unit {table_type_name} {sub_unit_key}]"
+            text_parts = [new_ph if p == old_ph else p for p in text_parts]
+
     text, breakpoints = assemble_text_and_breakpoints(text_parts)
 
     section_entry = {
@@ -737,10 +778,29 @@ def parse_section(
     if annotation_parts:
         section_entry["annotation"] = " ".join(annotation_parts).strip()
 
-    # Ensure unique identifier
-    section_name_plural = content["document_information"]["parameters"][1]["name_plural"]
-    section_id = ensure_unique_id(content["content"][section_name_plural], section_id, parsing_logfile, "section")
     content["content"][section_name_plural][section_id] = section_entry
+
+    # Build large table sub-unit dicts (keys already assigned pre-assembly).
+    if pending_large_tables:
+        di = content["document_information"]
+        table_sub_units: Dict[str, Any] = {}
+        index_entries: Dict[str, Any] = {}
+        for local_num, (xml_elem, sub_unit_key) in enumerate(
+                zip(pending_large_tables, table_sub_unit_keys), 1):
+            sub_unit = _build_xml_table_sub_unit(
+                xml_elem, local_num, section_entry["context"], section_name, section_id
+            )
+            table_sub_units[sub_unit_key] = sub_unit
+            index_entries[sub_unit_key] = {
+                "container_plural": section_name_plural,
+                "container_id": section_id,
+                "path": [section_id],
+            }
+        section_entry.setdefault("sub_units", {})[table_key_str] = table_sub_units
+        di["sub_unit_index"][table_key_str].update(index_entries)
+        log_parsing_correction("", "large_table_extraction",
+                               f"Extracted {len(table_sub_units)} large table(s) from "
+                               f"{section_name} '{section_id}'", parsing_logfile)
 
     update_begin_stop(org_pointer, "section", section_id)
 
@@ -1321,6 +1381,173 @@ def subdivide_into_eccns(
     return sub_units
 
 
+# ---------------------------------------------------------------------------
+# Method-section subdivision helpers
+# ---------------------------------------------------------------------------
+
+# HD1 headings that start a self-contained named section: "Method 301—...",
+# "Performance Specification 2—...", "Procedure 4—...", etc.
+METHOD_SECTION_PATTERN = re.compile(
+    r'^(Method|Performance Specification|Procedure)\s+\d+',
+    re.IGNORECASE
+)
+
+
+def _prescan_method_sections(appendix_elem: ET.Element) -> bool:
+    """
+    Gate 1: return True if the appendix has >= 2 HD1 direct children whose text
+    matches METHOD_SECTION_PATTERN (e.g. "Method 301—...", "Procedure 4—...").
+    """
+    count = 0
+    for child in appendix_elem:
+        if not isinstance(child.tag, str):
+            continue
+        if child.tag.upper() == 'HD1':
+            if METHOD_SECTION_PATTERN.match(extract_element_text(child).strip()):
+                count += 1
+                if count >= 2:
+                    return True
+    return False
+
+
+def _accumulate_method_segments(
+    appendix_elem: ET.Element,
+) -> tuple:
+    """
+    Walk the appendix element's direct children and partition them into:
+      - preamble_parts: text_parts for content before the first Method HD1
+      - segments: list of dicts, each with keys:
+            'title'       – full HD1 heading text (e.g. "Method 301—...")
+            'text_parts'  – list of text strings for this method's body
+            'has_content' – True if at least one non-heading element is present
+      - annotation_parts: annotation strings collected from the whole appendix
+
+    Tables are inlined as text within method segments (no sub-unit extraction);
+    the method segments themselves become sub-units of the appendix.
+
+    Returns (preamble_parts, segments, annotation_parts).
+    """
+    preamble_parts: List[str] = []
+    segments: List[dict] = []
+    annotation_parts: List[str] = []
+
+    # current_seg_idx == -1  →  writing to preamble_parts
+    # current_seg_idx >= 0   →  writing to segments[current_seg_idx]['text_parts']
+    current_seg_idx: int = -1
+
+    def _parts() -> List[str]:
+        return preamble_parts if current_seg_idx < 0 else segments[current_seg_idx]['text_parts']
+
+    def _mark_content() -> None:
+        if current_seg_idx >= 0:
+            segments[current_seg_idx]['has_content'] = True
+
+    for child in list(appendix_elem):
+        tag = child.tag.upper() if isinstance(child.tag, str) else ''
+
+        # ---- Routing: detect a new top-level Method/Procedure HD1 ----
+        if tag == 'HD1':
+            hd1_text = extract_element_text(child).strip()
+            if METHOD_SECTION_PATTERN.match(hd1_text):
+                segments.append({'title': hd1_text, 'text_parts': [], 'has_content': False})
+                current_seg_idx = len(segments) - 1
+                continue
+            # Sub-heading within the current section
+            if hd1_text:
+                _parts().append(f"\n##HD1## {hd1_text}\n")
+            continue
+
+        # ---- Skip non-content structural tags ----
+        if tag in ('HEAD', 'EDNOTE', 'FTNT', 'APPRO', 'PARAUTH', 'AUTH', 'SOURCE'):
+            continue
+
+        # ---- Annotations (go to shared list, not text) ----
+        if tag == 'XREF':
+            xref_text = extract_element_text(child)
+            if xref_text:
+                annotation_parts.append(f"Amendment pending: {xref_text}")
+            continue
+        if tag == 'CITA':
+            cita_text = extract_element_text(child)
+            if cita_text:
+                annotation_parts.append(f"CITA: {cita_text}")
+            continue
+        if tag == 'EFFDNOT':
+            effdnot_text = extract_effdnot_text(child)
+            if effdnot_text:
+                annotation_parts.append(effdnot_text)
+            continue
+
+        # ---- Content elements ----
+        if tag in ('P', 'PSPACE', 'FP', 'FP1', 'FP2',
+                   'FP-1', 'FP-2', 'FP1-2', 'FP2-2', 'FP2-3', 'FRP', 'FRP0',
+                   'FP-DASH', 'P-DASH',
+                   'P-1', 'P-2', 'P-3', 'P1', 'P2'):
+            para = extract_paragraph_text(child)
+            if tag in ('FP-DASH', 'P-DASH'):
+                _parts().append((para + " ________") if para else "________")
+            elif para:
+                _parts().append(para)
+            _mark_content()
+        elif tag == 'HALFDASH':
+            _parts().append("_____")
+            _mark_content()
+        elif tag == 'NOTE':
+            note_text = extract_note_text(child)
+            if note_text:
+                _parts().append(f"Note: {note_text}")
+                _mark_content()
+        elif tag == 'EXAMPLE':
+            example_text = extract_note_text(child)
+            if example_text:
+                _parts().append(f"Example: {example_text}")
+                _mark_content()
+        elif tag == 'EXTRACT':
+            extract_text = extract_block_text(child)
+            if extract_text:
+                _parts().append(extract_text)
+                _mark_content()
+        elif tag in ('HED1', 'PARTHD', 'DOCKETHD') or tag.startswith('HD'):
+            hd_text = extract_element_text(child)
+            if hd_text:
+                _parts().append(f"\n{hd_text}\n")
+        elif tag in ('GPOTABLE', 'TABLE'):
+            # Inline tables as text within method segments (no sub-unit extraction).
+            table_text = extract_table_text(child)
+            if table_text:
+                _parts().append(table_text)
+                _mark_content()
+        elif tag == 'LI':
+            para = extract_paragraph_text(child)
+            if para:
+                _parts().append(para)
+                _mark_content()
+        elif tag == 'SCOL2':
+            scol_text = extract_block_text(child)
+            if scol_text:
+                _parts().append(scol_text)
+                _mark_content()
+        elif tag == 'LDRWK':
+            ldrwk_text = extract_ldrwk_text(child)
+            if ldrwk_text:
+                _parts().append(ldrwk_text)
+                _mark_content()
+        elif tag in ('TCAP', 'BCAP'):
+            caption = extract_element_text(child)
+            if caption:
+                _parts().append(clean_text(caption))
+        elif tag in ('IMG', 'GPH') or child.tag == 'img':
+            _parts().append("[Image omitted]")
+            _mark_content()
+        elif tag.startswith('DIV'):
+            nested_parts = extract_nested_div_content(child)
+            _parts().extend(nested_parts)
+            if nested_parts:
+                _mark_content()
+
+    return preamble_parts, segments, annotation_parts
+
+
 def parse_appendix(
     appendix_elem: ET.Element,
     content: Dict[str, Any],
@@ -1385,155 +1612,215 @@ def parse_appendix(
     else:
         # Use the full head text as title (includes item name)
         title = head_text if head_text else raw_item_id
-
-        text_parts: List[str] = []
-        annotation_parts: List[str] = []
         notes = extract_footnotes(appendix_elem)
 
-        for child in list(appendix_elem):
-            tag = child.tag.lower() if isinstance(child.tag, str) else ''
-            tag_upper = tag.upper()
+        # ---- Method-section subdivision (Gates 1 & 2) ----
+        # Gate 1: appendix must have >= 2 HD1 children matching the method pattern.
+        # Gate 2: every resulting segment must contain at least one content element.
+        # If both pass, each named section becomes a sub-unit; the appendix text holds
+        # only any preamble content that precedes the first Method/Procedure heading.
+        # Falls through to flat parsing if either gate fails.
+        _method_subdivision_applied = False
+        if _prescan_method_sections(appendix_elem):
+            _preamble_parts, _seg_list, annotation_parts = _accumulate_method_segments(appendix_elem)
+            if _seg_list and all(s['has_content'] for s in _seg_list):
+                _method_subdivision_applied = True
 
-            if tag == 'img':
-                # Image element - insert placeholder
-                text_parts.append("[Image omitted]")
-            elif tag_upper == 'HEAD':
-                continue
-            elif tag_upper == 'XREF':
-                xref_text = extract_element_text(child)
-                if xref_text:
-                    annotation_parts.append(f"Amendment pending: {xref_text}")
-            elif tag_upper in ('P', 'PSPACE'):
-                para = extract_paragraph_text(child)
-                if para:
-                    text_parts.append(para)
-            elif tag_upper in ('FP', 'FP1', 'FP2'):
-                para = extract_paragraph_text(child)
-                if para:
-                    text_parts.append(para)
-            # Additional flush paragraph variants
-            elif tag_upper in ('FP-1', 'FP-2', 'FP1-2', 'FP2-2', 'FP2-3', 'FRP', 'FRP0'):
-                para = extract_paragraph_text(child)
-                if para:
-                    text_parts.append(para)
-            # Dash paragraph types - add line indicator after
-            elif tag_upper in ('FP-DASH', 'P-DASH'):
-                para = extract_paragraph_text(child)
-                if para:
-                    text_parts.append(para + " ________")
-                else:
-                    text_parts.append("________")
-            # Half-dash - write-in line starting midway through column
-            elif tag_upper == 'HALFDASH':
-                text_parts.append("_____")
-            # Additional numbered paragraph variants
-            elif tag_upper in ('P-1', 'P-2', 'P-3', 'P1', 'P2'):
-                para = extract_paragraph_text(child)
-                if para:
-                    text_parts.append(para)
-            elif tag_upper == 'NOTE':
-                note_text = extract_note_text(child)
-                if note_text:
-                    text_parts.append(f"Note: {note_text}")
-            elif tag_upper == 'EXAMPLE':
-                example_text = extract_note_text(child)
-                if example_text:
-                    text_parts.append(f"Example: {example_text}")
-            elif tag_upper == 'EDNOTE':
-                continue
-            elif tag_upper == 'EXTRACT':
-                extract_text = extract_block_text(child)
-                if extract_text:
-                    text_parts.append(extract_text)
-            elif tag_upper == 'CITA':
-                cita_text = extract_element_text(child)
-                if cita_text:
-                    annotation_parts.append(f"CITA: {cita_text}")
-            elif tag_upper in ('FTNT', 'APPRO', 'PARAUTH', 'AUTH', 'SOURCE'):
-                # Footnotes handled separately; approval/authority ignored
-                continue
-            elif tag_upper == 'EFFDNOT':
-                # Effective date note - add to annotations
-                effdnot_text = extract_effdnot_text(child)
-                if effdnot_text:
-                    annotation_parts.append(effdnot_text)
-            elif tag_upper in ('HED1', 'PARTHD', 'DOCKETHD'):
-                # Additional heading types
-                hd_text = extract_element_text(child)
-                if hd_text:
-                    text_parts.append(f"\n{hd_text}\n")
-            elif tag_upper.startswith('HD'):
-                hd_text = extract_element_text(child)
-                if hd_text:
-                    if tag_upper == 'HD1':
-                        text_parts.append(f"\n##HD1## {hd_text}\n")
+                text, breakpoints = assemble_text_and_breakpoints(_preamble_parts)
+                item_entry = {
+                    "text": text,
+                    "unit_title": clean_unit_title(title),
+                    "breakpoints": breakpoints,
+                    "notes": notes,
+                    "context": list(context),
+                }
+                if annotation_parts:
+                    item_entry["annotation"] = " ".join(annotation_parts).strip()
+
+                # Register the method-section sub-unit parameter type and build dicts.
+                _param_ptr = content["document_information"]["parameters"]
+                _ms_key = find_or_create_method_section_param_key(_param_ptr)
+                _ms_type_name = _param_ptr[_ms_key]['name']
+                _ms_key_str = str(_ms_key)
+                _di = content["document_information"]
+                _di.setdefault("sub_unit_index", {})
+                _di["sub_unit_index"].setdefault(_ms_key_str, {})
+                _taken: set = set(_di["sub_unit_index"][_ms_key_str].keys())
+                _sub_unit_context = list(context) + [{item_name: item_id}]
+
+                _ms_sub_units: Dict[str, Any] = {}
+                _ms_index_entries: Dict[str, Any] = {}
+                for _local_num, _seg in enumerate(_seg_list, 1):
+                    _seg_key = assign_method_section_key(_seg['title'], _local_num, _taken)
+                    _taken.add(_seg_key)
+                    _seg_text, _seg_bps = assemble_text_and_breakpoints(_seg['text_parts'])
+                    _ms_sub_units[_seg_key] = {
+                        "text": _seg_text,
+                        "unit_title": _seg['title'],
+                        "breakpoints": _seg_bps,
+                        "context": _sub_unit_context,
+                    }
+                    _ms_index_entries[_seg_key] = {
+                        "container_plural": name_plural,
+                        "container_id": item_id,
+                        "path": [item_id],
+                    }
+
+                item_entry["sub_units"] = {_ms_key_str: _ms_sub_units}
+                _di["sub_unit_index"][_ms_key_str].update(_ms_index_entries)
+                log_parsing_correction("", "method_section_subdivision",
+                                       f"Subdivided {item_name} '{item_id}' into "
+                                       f"{len(_ms_sub_units)} method sections", parsing_logfile)
+
+        if not _method_subdivision_applied:
+            # ---- Flat text assembly (existing path) ----
+            text_parts: List[str] = []
+            annotation_parts: List[str] = []
+
+            for child in list(appendix_elem):
+                tag = child.tag.lower() if isinstance(child.tag, str) else ''
+                tag_upper = tag.upper()
+
+                if tag == 'img':
+                    # Image element - insert placeholder
+                    text_parts.append("[Image omitted]")
+                elif tag_upper == 'HEAD':
+                    continue
+                elif tag_upper == 'XREF':
+                    xref_text = extract_element_text(child)
+                    if xref_text:
+                        annotation_parts.append(f"Amendment pending: {xref_text}")
+                elif tag_upper in ('P', 'PSPACE'):
+                    para = extract_paragraph_text(child)
+                    if para:
+                        text_parts.append(para)
+                elif tag_upper in ('FP', 'FP1', 'FP2'):
+                    para = extract_paragraph_text(child)
+                    if para:
+                        text_parts.append(para)
+                # Additional flush paragraph variants
+                elif tag_upper in ('FP-1', 'FP-2', 'FP1-2', 'FP2-2', 'FP2-3', 'FRP', 'FRP0'):
+                    para = extract_paragraph_text(child)
+                    if para:
+                        text_parts.append(para)
+                # Dash paragraph types - add line indicator after
+                elif tag_upper in ('FP-DASH', 'P-DASH'):
+                    para = extract_paragraph_text(child)
+                    if para:
+                        text_parts.append(para + " ________")
                     else:
+                        text_parts.append("________")
+                # Half-dash - write-in line starting midway through column
+                elif tag_upper == 'HALFDASH':
+                    text_parts.append("_____")
+                # Additional numbered paragraph variants
+                elif tag_upper in ('P-1', 'P-2', 'P-3', 'P1', 'P2'):
+                    para = extract_paragraph_text(child)
+                    if para:
+                        text_parts.append(para)
+                elif tag_upper == 'NOTE':
+                    note_text = extract_note_text(child)
+                    if note_text:
+                        text_parts.append(f"Note: {note_text}")
+                elif tag_upper == 'EXAMPLE':
+                    example_text = extract_note_text(child)
+                    if example_text:
+                        text_parts.append(f"Example: {example_text}")
+                elif tag_upper == 'EDNOTE':
+                    continue
+                elif tag_upper == 'EXTRACT':
+                    extract_text = extract_block_text(child)
+                    if extract_text:
+                        text_parts.append(extract_text)
+                elif tag_upper == 'CITA':
+                    cita_text = extract_element_text(child)
+                    if cita_text:
+                        annotation_parts.append(f"CITA: {cita_text}")
+                elif tag_upper in ('FTNT', 'APPRO', 'PARAUTH', 'AUTH', 'SOURCE'):
+                    # Footnotes handled separately; approval/authority ignored
+                    continue
+                elif tag_upper == 'EFFDNOT':
+                    # Effective date note - add to annotations
+                    effdnot_text = extract_effdnot_text(child)
+                    if effdnot_text:
+                        annotation_parts.append(effdnot_text)
+                elif tag_upper in ('HED1', 'PARTHD', 'DOCKETHD'):
+                    # Additional heading types
+                    hd_text = extract_element_text(child)
+                    if hd_text:
                         text_parts.append(f"\n{hd_text}\n")
-            elif tag_upper == 'GPOTABLE' or tag_upper == 'TABLE':
-                xml_row_count = _count_xml_table_rows(child)
-                if xml_row_count >= LARGE_TABLE_ROW_THRESHOLD:
-                    # Large table: collect for sub-unit extraction; add placeholder.
-                    pending_large_tables.append(child)
-                    local_num = len(pending_large_tables)
-                    text_parts.append(f"[Table {local_num} pending sub-unit extraction]")
-                else:
-                    table_text = extract_table_text(child)
-                    if table_text:
-                        text_parts.append(table_text)
-            # List items - each on own line
-            elif tag_upper == 'LI':
-                para = extract_paragraph_text(child)
-                if para:
-                    text_parts.append(para)
-            # Two-column list container - extract contents
-            elif tag_upper == 'SCOL2':
-                scol_text = extract_block_text(child)
-                if scol_text:
-                    text_parts.append(scol_text)
-            # Leader work (forms with left/right alignment)
-            elif tag_upper == 'LDRWK':
-                ldrwk_text = extract_ldrwk_text(child)
-                if ldrwk_text:
-                    text_parts.append(ldrwk_text)
-            # Captions for images
-            elif tag_upper in ('TCAP', 'BCAP'):
-                caption = extract_element_text(child)
-                if caption:
-                    text_parts.append(clean_text(caption))
-            elif tag_upper.startswith('DIV'):
-                # Nested DIVs within appendix may contain tables and other content
-                nested_parts = extract_nested_div_content(child, pending_large_tables)
-                text_parts.extend(nested_parts)
-            elif tag_upper == 'IMG' or tag_upper == 'GPH':
-                # Image element - insert placeholder
-                text_parts.append("[Image omitted]")
+                elif tag_upper.startswith('HD'):
+                    hd_text = extract_element_text(child)
+                    if hd_text:
+                        if tag_upper == 'HD1':
+                            text_parts.append(f"\n##HD1## {hd_text}\n")
+                        else:
+                            text_parts.append(f"\n{hd_text}\n")
+                elif tag_upper == 'GPOTABLE' or tag_upper == 'TABLE':
+                    xml_row_count = _count_xml_table_rows(child)
+                    if xml_row_count >= LARGE_TABLE_ROW_THRESHOLD:
+                        # Large table: collect for sub-unit extraction; add placeholder.
+                        pending_large_tables.append(child)
+                        local_num = len(pending_large_tables)
+                        text_parts.append(f"[Table {local_num} pending sub-unit extraction]")
+                    else:
+                        table_text = extract_table_text(child)
+                        if table_text:
+                            text_parts.append(table_text)
+                # List items - each on own line
+                elif tag_upper == 'LI':
+                    para = extract_paragraph_text(child)
+                    if para:
+                        text_parts.append(para)
+                # Two-column list container - extract contents
+                elif tag_upper == 'SCOL2':
+                    scol_text = extract_block_text(child)
+                    if scol_text:
+                        text_parts.append(scol_text)
+                # Leader work (forms with left/right alignment)
+                elif tag_upper == 'LDRWK':
+                    ldrwk_text = extract_ldrwk_text(child)
+                    if ldrwk_text:
+                        text_parts.append(ldrwk_text)
+                # Captions for images
+                elif tag_upper in ('TCAP', 'BCAP'):
+                    caption = extract_element_text(child)
+                    if caption:
+                        text_parts.append(clean_text(caption))
+                elif tag_upper.startswith('DIV'):
+                    # Nested DIVs within appendix may contain tables and other content
+                    nested_parts = extract_nested_div_content(child, pending_large_tables)
+                    text_parts.extend(nested_parts)
+                elif tag_upper == 'IMG' or tag_upper == 'GPH':
+                    # Image element - insert placeholder
+                    text_parts.append("[Image omitted]")
 
-        text, breakpoints = assemble_text_and_breakpoints(text_parts)
-
-        # If CCL subdivision will run and we have pending_large_tables, inline table
-        # content in text_parts and reassemble so breakpoints stay correct. Replacing
-        # in the final text would change its length and invalidate breakpoints.
-        if (item_type_num == 3
-                and len(text) >= ECCN_SUBDIVISION_THRESHOLD
-                and pending_large_tables):
-            for i, part in enumerate(text_parts):
-                for local_num, xml_elem in enumerate(pending_large_tables, 1):
-                    placeholder = f"[Table {local_num} pending sub-unit extraction]"
-                    if part == placeholder:
-                        text_parts[i] = extract_table_text(xml_elem) or ""
-                        break
             text, breakpoints = assemble_text_and_breakpoints(text_parts)
-            pending_large_tables.clear()
 
-        item_entry = {
-            "text": text,
-            "unit_title": clean_unit_title(title),
-            "breakpoints": breakpoints,
-            "notes": notes,
-            "context": list(context)
-        }
-        if annotation_parts:
-            item_entry["annotation"] = " ".join(annotation_parts).strip()
+            # If CCL subdivision will run and we have pending_large_tables, inline table
+            # content in text_parts and reassemble so breakpoints stay correct. Replacing
+            # in the final text would change its length and invalidate breakpoints.
+            if (item_type_num == 3
+                    and len(text) >= ECCN_SUBDIVISION_THRESHOLD
+                    and pending_large_tables):
+                for i, part in enumerate(text_parts):
+                    for local_num, xml_elem in enumerate(pending_large_tables, 1):
+                        placeholder = f"[Table {local_num} pending sub-unit extraction]"
+                        if part == placeholder:
+                            text_parts[i] = extract_table_text(xml_elem) or ""
+                            break
+                text, breakpoints = assemble_text_and_breakpoints(text_parts)
+                pending_large_tables.clear()
+
+            item_entry = {
+                "text": text,
+                "unit_title": clean_unit_title(title),
+                "breakpoints": breakpoints,
+                "notes": notes,
+                "context": list(context)
+            }
+            if annotation_parts:
+                item_entry["annotation"] = " ".join(annotation_parts).strip()
 
     # Attempt CCL subdivision for long supplements (3-level: Category → Section → ECCN)
     if (item_type_num == 3
@@ -2492,6 +2779,7 @@ def process_file(
         parser='cfr_set_parse.py',
         parser_type='ecfr'
     )
+    manifest_mgr.update_source_hash(manifest, input_file_path)
 
     parsing_logfile = get_parsing_issues_logfile(doc_output_dir)
 

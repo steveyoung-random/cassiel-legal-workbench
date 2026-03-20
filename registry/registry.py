@@ -14,7 +14,7 @@ import sqlite3
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 
 class Registry:
@@ -305,6 +305,65 @@ class Registry:
                 (notes, ref_id)
             )
             conn.commit()
+
+    def delete_all_references_for_document(self, corpus_doc_id: int) -> int:
+        """
+        Delete all cross_references rows for a document.
+
+        Used when archiving a processed file for full re-run: the document will be
+        completely re-extracted after Stage 2/3, so all existing rows are stale.
+
+        Args:
+            corpus_doc_id: ID from corpus_documents.
+
+        Returns:
+            Number of rows deleted.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM cross_references WHERE source_doc_id = ?",
+                (corpus_doc_id,),
+            )
+            conn.commit()
+            return cursor.rowcount
+
+    def delete_references_for_items(
+        self,
+        corpus_doc_id: int,
+        type_number_pairs: List[Tuple[str, str]],
+    ) -> int:
+        """
+        Delete cross_references rows for specific (type, number) pairs within a document.
+
+        Used by the diff tool to remove stale references when source content changes.
+        Matching on both source_item_type and source_item_number avoids incorrectly
+        deleting rows for a different item type that happens to share the same number.
+
+        Args:
+            corpus_doc_id:     ID from corpus_documents for the source document.
+            type_number_pairs: List of (source_item_type, source_item_number) tuples,
+                               e.g. [('section', '201'), ('eccn', '0A001')].
+
+        Returns:
+            Number of rows deleted.
+        """
+        if not type_number_pairs:
+            return 0
+        total = 0
+        with self._get_connection() as conn:
+            for item_type, item_number in type_number_pairs:
+                cursor = conn.execute(
+                    """
+                    DELETE FROM cross_references
+                    WHERE source_doc_id = ?
+                      AND source_item_type = ?
+                      AND source_item_number = ?
+                    """,
+                    (corpus_doc_id, item_type, item_number),
+                )
+                total += cursor.rowcount
+            conn.commit()
+        return total
 
     def get_references(self, source_doc_id: Optional[int] = None,
                        resolution_status: Optional[str] = None) -> List[Dict[str, Any]]:

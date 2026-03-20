@@ -7,22 +7,25 @@ For completed work, see `archive/COMPLETED_ENHANCEMENTS.md`.
 
 ## Processing Enhancements
 
-### Content Refresh & Diff Detection
+### Model-Agnostic Cache Mode
 
 **Priority**: Medium
 
-When a source document is updated (e.g., a new eCFR release), the current
-approach is to re-parse and re-process the whole document. The planned
-improvement is to:
+The current API call cache keys results on both prompt content and the model
+name. When switching to a newer model, the cache goes cold and every call is
+treated as new — even for documents and units whose content has not changed.
 
-- Hash each parsed unit and the source file at parse time
-- On re-parse, compare hashes to identify new, removed, and modified units
-- Re-run Stages 2 and 3 only on changed units
-- Invalidate downstream cross-references and summaries that depend on
-  changed units
+The planned enhancement adds a second cache mode that keys on prompt content
+only, ignoring the model. In this mode, a re-run after a model upgrade reuses
+cached results for unchanged units (from the previous model) and generates
+new results only for changed units (using the new model). The document is
+processed efficiently, though units from different processing runs may have
+used different models — an accepted trade-off when the goal is cost-efficient
+corpus maintenance rather than uniform model coverage.
 
-This would make it practical to keep a large corpus current as source
-documents are updated, without incurring the full processing cost each time.
+The model-aware mode (current behavior) is preserved and remains the default.
+Users who want uniform model coverage across a document can always do a full
+model-aware rerun.
 
 ---
 
@@ -188,4 +191,4 @@ override functions but requires thorough testing with EU documents.
 
 ---
 
-*Last Updated: 2026-03-05*
+*Last Updated: 2026-03-19*

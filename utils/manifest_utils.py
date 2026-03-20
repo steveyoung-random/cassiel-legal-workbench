@@ -10,11 +10,28 @@ manifest file location. Absolute paths are computed dynamically when needed.
 # Copyright (c) 2024-2026 Steve Young
 # Licensed under the MIT License
 
+import hashlib
 import json
 import os
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+
+
+def compute_source_hash(source_path: str) -> str:
+    """
+    Return SHA-256 hex digest of the source file bytes.
+    Prefix with 'sha256:' for future algorithm agility.
+    Returns empty string if file cannot be read.
+    """
+    try:
+        h = hashlib.sha256()
+        with open(source_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b''):
+                h.update(chunk)
+        return f'sha256:{h.hexdigest()}'
+    except OSError:
+        return ''
 
 
 class ManifestManager:
@@ -77,6 +94,7 @@ class ManifestManager:
             "source_type": source_type,  # Legacy field
             "parser": parser,  # Legacy field
             "parser_type": parser_type or source_type,  # Use parser_type if provided, fallback to source_type
+            "source_hash": compute_source_hash(source_file),
             "parsed_files": [],
             "metadata": {
                 "created": datetime.now(UTC).isoformat().replace('+00:00', 'Z'),
@@ -95,6 +113,14 @@ class ManifestManager:
         """
         with open(self.manifest_path, 'r', encoding='utf-8') as f:
             return json.load(f)
+
+    def update_source_hash(self, manifest: Dict[str, Any], source_file: str) -> None:
+        """
+        Compute and store the SHA-256 hash of source_file in the manifest.
+        Called by parsers after create_or_load() and before save(), so the hash
+        always reflects the source file used in the most recent parse run.
+        """
+        manifest['source_hash'] = compute_source_hash(source_file)
 
     def update_short_title(self, manifest: Dict[str, Any], short_title: str) -> None:
         """

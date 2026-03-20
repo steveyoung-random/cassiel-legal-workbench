@@ -862,6 +862,7 @@ def process_file(input_file_path, config, parse_mode='split_chapters', title='',
         source_type='uslm',
         parser='uslm_set_parse.py'
     )
+    manifest_mgr.update_source_hash(manifest, input_file_path)
 
     # Get parsing logfile (at USC level)
     parsing_logfile = get_parsing_issues_logfile(doc_output_dir)

@@ -462,6 +462,7 @@ def process_file(input_file_path, config):
         parser='CA_parse_set.py',
         parser_type='ca_html'
     )
+    manifest_mgr.update_source_hash(manifest, input_file_path)
 
     # Output file path
     output_filename = f'{file_stem}_parse_output.json'
