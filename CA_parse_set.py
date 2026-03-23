@@ -94,9 +94,11 @@ def _register_ca_large_tables(content, item_pointer, pending_large_tables, secti
         sub_unit_key = assign_table_key(local_num, section_number, taken)
         taken.add(sub_unit_key)
         sub_unit = _build_ca_table_sub_unit(table_tag, local_num, parent_context, section_number)
+        final_placeholder = f"[Table {local_num} extracted as sub-unit {table_type_name} {sub_unit_key}]"
+        sub_unit['placeholder'] = final_placeholder
         current_text = current_text.replace(
             f"[Table {local_num} pending sub-unit extraction]",
-            f"[Table {local_num} extracted as sub-unit {table_type_name} {sub_unit_key}]",
+            final_placeholder,
         )
         table_sub_units[sub_unit_key] = sub_unit
         index_entries[sub_unit_key] = {

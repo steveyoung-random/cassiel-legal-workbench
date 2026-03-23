@@ -18,12 +18,27 @@ from utils import (
     build_external_reference_validation_prompt,
     build_high_conflict_review_prompt,
     lookup_item,
+    chunk_text,
     InputError,
     ModelError,
 )
 from utils.config import create_client_for_task
 from .processor import DefinitionsProcessor
 from .indirect_resolution import remove_definition
+
+_STAGE2_CHUNK_SIZE = 15000  # preferred chunk length (consistent with Stage 3)
+
+
+def _build_item_cache_prompt(item_type_name, cap_item_type_name, item_number, chunk_prefix, text):
+    """Build the cache prompt for one chunk of item text."""
+    cp = ('You will be asked about definitions within this ' + item_type_name +
+          ' from a larger statute or legal document:\n\n***Begin ' + item_type_name + '***\n')
+    cp += cap_item_type_name + ' ' + item_number + ':\n'
+    if chunk_prefix:
+        cp += chunk_prefix + '\n\n'
+    cp += text
+    cp += '\n***End ' + item_type_name + '***\n\n'
+    return cp
 
 
 def check_external_reference_validity(proc, def_entry, client=None):
@@ -342,6 +357,7 @@ def evaluate_and_improve_definitions(proc, count=30):
     # }
     unique_definitions = {}
     source_texts = {}
+    source_items = {}  # (source_type, source_number) -> source item dict (for breakpoints/chunk_prefix)
 
     # Collect all definitions that need evaluation and group by unique key
     for def_entry, org_context, operational_context in iter_definitions(proc.parsed_content):
@@ -377,16 +393,14 @@ def evaluate_and_improve_definitions(proc, count=30):
         # Add this copy to the list
         unique_definitions[unique_key]['all_copies'].append((def_entry, org_context, operational_context))
 
-        # Get source text if not already cached (and source info exists)
+        # Get source item if not already cached (and source info exists)
         if source_type and source_number:
             source_key = (source_type, source_number)
-            if source_key not in source_texts:
+            if source_key not in source_items:
                 source_type_singular, source_type_plural = canonical_org_types(source_type)
                 source_item = lookup_item(proc.parsed_content, source_type_plural, source_number)
-                if source_item is not None:
-                    source_texts[source_key] = source_item.get('text', '')
-                else:
-                    source_texts[source_key] = ''
+                source_items[source_key] = source_item or {}
+                source_texts[source_key] = (source_item or {}).get('text', '')
 
     # Process unique definitions
     for unique_key, def_info in unique_definitions.items():
@@ -438,13 +452,25 @@ def evaluate_and_improve_definitions(proc, count=30):
             count -= 1
             continue
 
-        # Build cache prompt for source item
+        # Build cache prompt for source item, scoped to the chunk containing this term.
+        # For short items (no breakpoints, or text < chunk size), chunk_text yields the
+        # full text as a single chunk — behavior is identical to the pre-chunking path.
         source_type_singular, source_type_plural = canonical_org_types(source_type)
         cap_source_type = source_type[0].upper() + source_type[1:] if source_type else 'Section'
-        cache_prompt = f'You will be asked about definitions within this {source_type} from a larger statute or legal document:\n\n***Begin {source_type}***\n'
-        cache_prompt += f'{cap_source_type} {source_number}:\n'
-        cache_prompt += source_text
-        cache_prompt += f'\n***End {source_type}***\n\n'
+        src_item = source_items.get(source_key, {})
+        breakpoints = src_item.get('breakpoints', [])
+        chunk_prefix = src_item.get('chunk_prefix', '')
+        chunks = list(chunk_text(source_text, breakpoints, preferred_length=_STAGE2_CHUNK_SIZE))
+        # Locate-then-extract: find first chunk containing the term (case-insensitive).
+        # Falls back to first chunk (= full text for single-chunk items) if not found.
+        target_chunk = chunks[0] if chunks else source_text
+        if len(chunks) > 1:
+            term_lower = term.lower()
+            for c in chunks:
+                if term_lower in c.lower():
+                    target_chunk = c
+                    break
+        cache_prompt = _build_item_cache_prompt(source_type, cap_source_type, source_number, chunk_prefix, target_chunk)
 
         # Evaluate the canonical definition (first copy found)
         existing_definition = canonical_def.get('value', '').strip()

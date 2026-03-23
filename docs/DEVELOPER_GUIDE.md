@@ -114,24 +114,30 @@ cassiel-legal-workbench/
 
 ## Stage 1: Parsing
 
-**Goal:** Convert source documents to standardized JSON format (v0.3 for USLM/Formex/CA; v0.5 for CFR).
+**Goal:** Convert source documents to standardized JSON format (v0.5).
 
 **Parsers:**
-- `uslm_set_parse.py` - United States Code (USLM XML) → v0.3
-- `formex_set_parse.py` - European Union regulations (Formex XML) → v0.3
-- `CA_parse_set.py` - California statutes (HTML) → v0.3
-- `cfr_set_parse.py` - Code of Federal Regulations (eCFR XML) → v0.5, see `CFR_ECFR_PARSER_PLAN.md`
+- `uslm_set_parse.py` - United States Code (USLM XML)
+- `formex_set_parse.py` - European Union regulations (Formex XML)
+- `CA_parse_set.py` - California statutes (HTML)
+- `cfr_set_parse.py` - Code of Federal Regulations (eCFR XML)
 
 **v0.5 Schema (Nested Sub-Units):**
 
-The CFR parser automatically subdivides very long supplements into nested sub-units. For example, the Commerce Control List (Supplement No. 1 to Part 774, 1.68M chars) becomes 649 sub-units (638 ECCNs + 10 EAR99 variants + 1 preamble), each independently processable through Stages 2-4.
+All parsers can produce nested sub-units for content that is too long or structurally distinct to process as a single unit. Sub-unit types in current use:
 
-Key schema in v0.5:
+- **ECCN sub-units** (CFR only): The Commerce Control List (Supplement No. 1 to Part 774, 1.68M chars) is subdivided into 649 ECCNs at parse time, each independently processable through Stages 2–4. Three-level hierarchy: supplement → ccl_category → ccl_section → eccn.
+- **Table sub-units** (all parsers): Large HTML or XML tables (≥50 rows) are extracted as `table` sub-units with `data_table: 1`. Stage 2 skips them; Stage 3 generates a structure summary; Stage 4 uses the summary as analyst content.
+- **Definition-list sub-units** (Formex parser): Long `<LIST>` elements in articles or annexes titled "Definitions" (≥5 items, ≥4,000 chars) are extracted as `definition_list` sub-units with item-boundary breakpoints and a `chunk_prefix` carrying the scope preamble.
+
+Key schema fields:
 - `parameters[M]["is_sub_unit"]` — marks types that live inside parent containers (no top-level content section)
-- Container items have `sub_units` as a type-keyed dict: `{param_key: {sub_id: sub_item, ...}, ...}` (e.g. `{"11": {"0A001": {...}, ...}}`), allowing multiple sub-unit types per container
+- Container items have `sub_units` as a type-keyed dict: `{param_key: {sub_id: sub_item, ...}, ...}`, allowing multiple sub-unit types per container
 - Each sub-unit item has the same fields as a substantive unit (`text`, `context`, `breakpoints`, etc.)
+- `placeholder` (optional): exact string used in parent `text` in place of this sub-unit's content; enables text reconstruction
+- `chunk_prefix` (optional): text prepended verbatim to every AI chunk; used when scope context lives in the parent rather than the sub-unit
 
-All processing stages handle both v0.3 and v0.5 documents transparently. See `JSON_SPECIFICATION.md` for full schema details and `NESTED_SUBSTANTIVE_UNITS_PLAN.md` for design rationale.
+All processing stages handle documents with and without sub-units transparently. See `JSON_SPECIFICATION.md` for full schema details.
 
 **Key Tasks:**
 - Extract organizational hierarchy (titles, chapters, sections)

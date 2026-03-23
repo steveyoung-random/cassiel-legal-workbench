@@ -790,6 +790,7 @@ def parse_section(
             sub_unit = _build_xml_table_sub_unit(
                 xml_elem, local_num, section_entry["context"], section_name, section_id
             )
+            sub_unit['placeholder'] = f"[Table {local_num} extracted as sub-unit {table_type_name} {sub_unit_key}]"
             table_sub_units[sub_unit_key] = sub_unit
             index_entries[sub_unit_key] = {
                 "container_plural": section_name_plural,
@@ -1416,27 +1417,37 @@ def _accumulate_method_segments(
     """
     Walk the appendix element's direct children and partition them into:
       - preamble_parts: text_parts for content before the first Method HD1
+      - preamble_pending_tables: large GPOTABLE/TABLE elements from the preamble
       - segments: list of dicts, each with keys:
-            'title'       – full HD1 heading text (e.g. "Method 301—...")
-            'text_parts'  – list of text strings for this method's body
-            'has_content' – True if at least one non-heading element is present
+            'title'          – full HD1 heading text (e.g. "Method 301—...")
+            'text_parts'     – list of text strings for this method's body
+            'has_content'    – True if at least one non-heading element is present
+            'pending_tables' – large GPOTABLE/TABLE elements for sub-unit extraction
       - annotation_parts: annotation strings collected from the whole appendix
 
-    Tables are inlined as text within method segments (no sub-unit extraction);
-    the method segments themselves become sub-units of the appendix.
+    Large tables (≥ LARGE_TABLE_ROW_THRESHOLD rows) are intercepted and stored
+    in pending_tables (per segment) or preamble_pending_tables.  A placeholder
+    string is added to text_parts in their place.  Small tables are still inlined.
+    The caller must replace placeholders with final key-based markers and register
+    sub-unit dicts BEFORE calling assemble_text_and_breakpoints, so that breakpoint
+    offsets reflect the final text.
 
-    Returns (preamble_parts, segments, annotation_parts).
+    Returns (preamble_parts, preamble_pending_tables, segments, annotation_parts).
     """
     preamble_parts: List[str] = []
+    preamble_pending_tables: List[ET.Element] = []
     segments: List[dict] = []
     annotation_parts: List[str] = []
 
-    # current_seg_idx == -1  →  writing to preamble_parts
-    # current_seg_idx >= 0   →  writing to segments[current_seg_idx]['text_parts']
+    # current_seg_idx == -1  →  writing to preamble_parts / preamble_pending_tables
+    # current_seg_idx >= 0   →  writing to segments[current_seg_idx]
     current_seg_idx: int = -1
 
     def _parts() -> List[str]:
         return preamble_parts if current_seg_idx < 0 else segments[current_seg_idx]['text_parts']
+
+    def _pending_tables() -> List:
+        return preamble_pending_tables if current_seg_idx < 0 else segments[current_seg_idx]['pending_tables']
 
     def _mark_content() -> None:
         if current_seg_idx >= 0:
@@ -1449,7 +1460,12 @@ def _accumulate_method_segments(
         if tag == 'HD1':
             hd1_text = extract_element_text(child).strip()
             if METHOD_SECTION_PATTERN.match(hd1_text):
-                segments.append({'title': hd1_text, 'text_parts': [], 'has_content': False})
+                segments.append({
+                    'title': hd1_text,
+                    'text_parts': [],
+                    'has_content': False,
+                    'pending_tables': [],
+                })
                 current_seg_idx = len(segments) - 1
                 continue
             # Sub-heading within the current section
@@ -1512,11 +1528,19 @@ def _accumulate_method_segments(
             if hd_text:
                 _parts().append(f"\n{hd_text}\n")
         elif tag in ('GPOTABLE', 'TABLE'):
-            # Inline tables as text within method segments (no sub-unit extraction).
-            table_text = extract_table_text(child)
-            if table_text:
-                _parts().append(table_text)
+            row_count = _count_xml_table_rows(child)
+            if row_count >= LARGE_TABLE_ROW_THRESHOLD:
+                # Large table: defer to sub-unit extraction; add placeholder.
+                pt = _pending_tables()
+                pt.append(child)
+                local_num = len(pt)
+                _parts().append(f"[Table {local_num} pending sub-unit extraction]")
                 _mark_content()
+            else:
+                table_text = extract_table_text(child)
+                if table_text:
+                    _parts().append(table_text)
+                    _mark_content()
         elif tag == 'LI':
             para = extract_paragraph_text(child)
             if para:
@@ -1540,12 +1564,12 @@ def _accumulate_method_segments(
             _parts().append("[Image omitted]")
             _mark_content()
         elif tag.startswith('DIV'):
-            nested_parts = extract_nested_div_content(child)
+            nested_parts = extract_nested_div_content(child, _pending_tables())
             _parts().extend(nested_parts)
             if nested_parts:
                 _mark_content()
 
-    return preamble_parts, segments, annotation_parts
+    return preamble_parts, preamble_pending_tables, segments, annotation_parts
 
 
 def parse_appendix(
@@ -1622,9 +1646,61 @@ def parse_appendix(
         # Falls through to flat parsing if either gate fails.
         _method_subdivision_applied = False
         if _prescan_method_sections(appendix_elem):
-            _preamble_parts, _seg_list, annotation_parts = _accumulate_method_segments(appendix_elem)
-            if _seg_list and all(s['has_content'] for s in _seg_list):
+            _preamble_parts, _preamble_pending_tables, _seg_list, annotation_parts = \
+                _accumulate_method_segments(appendix_elem)
+            if _seg_list:
                 _method_subdivision_applied = True
+
+                _param_ptr = content["document_information"]["parameters"]
+                _di = content["document_information"]
+                _di.setdefault("sub_unit_index", {})
+
+                # Register the method-section sub-unit parameter type.
+                _ms_key = find_or_create_method_section_param_key(_param_ptr)
+                _ms_type_name = _param_ptr[_ms_key]['name']
+                _ms_key_str = str(_ms_key)
+                _di["sub_unit_index"].setdefault(_ms_key_str, {})
+                _taken: set = set(_di["sub_unit_index"][_ms_key_str].keys())
+                _sub_unit_context = list(context) + [{item_name: item_id}]
+
+                # If any segment or the preamble has large tables, register the
+                # table parameter type once for the whole appendix.
+                _has_any_tables = bool(_preamble_pending_tables) or any(
+                    s['pending_tables'] for s in _seg_list
+                )
+                if _has_any_tables:
+                    _tbl_param_key = find_or_create_table_param_key(_param_ptr)
+                    _tbl_type_name = _param_ptr[_tbl_param_key]['name']
+                    _tbl_key_str = str(_tbl_param_key)
+                    _di["sub_unit_index"].setdefault(_tbl_key_str, {})
+                    _tbl_taken: set = set(_di["sub_unit_index"][_tbl_key_str].keys())
+                else:
+                    _tbl_param_key = _tbl_type_name = _tbl_key_str = None
+                    _tbl_taken = set()
+
+                # ---- Preamble: replace table placeholders before assembling text ----
+                _preamble_tbl_sub_units: Dict[str, Any] = {}
+                _preamble_tbl_index: Dict[str, Any] = {}
+                for _p_local, _p_elem in enumerate(_preamble_pending_tables, 1):
+                    _p_key = assign_table_key(_p_local, item_id, _tbl_taken)
+                    _tbl_taken.add(_p_key)
+                    placeholder = f"[Table {_p_local} pending sub-unit extraction]"
+                    final_marker = (
+                        f"[Table {_p_local} extracted as sub-unit {_tbl_type_name} {_p_key}]"
+                    )
+                    for _i, _part in enumerate(_preamble_parts):
+                        if _part == placeholder:
+                            _preamble_parts[_i] = final_marker
+                            break
+                    _preamble_tbl_sub_units[_p_key] = _build_xml_table_sub_unit(
+                        _p_elem, _p_local, list(context), item_name, item_id
+                    )
+                    _preamble_tbl_sub_units[_p_key]['placeholder'] = final_marker
+                    _preamble_tbl_index[_p_key] = {
+                        "container_plural": name_plural,
+                        "container_id": item_id,
+                        "path": [],
+                    }
 
                 text, breakpoints = assemble_text_and_breakpoints(_preamble_parts)
                 item_entry = {
@@ -1637,36 +1713,82 @@ def parse_appendix(
                 if annotation_parts:
                     item_entry["annotation"] = " ".join(annotation_parts).strip()
 
-                # Register the method-section sub-unit parameter type and build dicts.
-                _param_ptr = content["document_information"]["parameters"]
-                _ms_key = find_or_create_method_section_param_key(_param_ptr)
-                _ms_type_name = _param_ptr[_ms_key]['name']
-                _ms_key_str = str(_ms_key)
-                _di = content["document_information"]
-                _di.setdefault("sub_unit_index", {})
-                _di["sub_unit_index"].setdefault(_ms_key_str, {})
-                _taken: set = set(_di["sub_unit_index"][_ms_key_str].keys())
-                _sub_unit_context = list(context) + [{item_name: item_id}]
-
+                # ---- Build each method-section sub-unit ----
                 _ms_sub_units: Dict[str, Any] = {}
                 _ms_index_entries: Dict[str, Any] = {}
                 for _local_num, _seg in enumerate(_seg_list, 1):
                     _seg_key = assign_method_section_key(_seg['title'], _local_num, _taken)
                     _taken.add(_seg_key)
+                    _seg_context = _sub_unit_context + [{"method_section": _seg_key}]
+
+                    # Pre-assign table keys and replace placeholders in text_parts
+                    # BEFORE calling assemble_text_and_breakpoints, so breakpoint
+                    # offsets reflect the final text length.
+                    _seg_tbl_sub_units: Dict[str, Any] = {}
+                    _seg_tbl_index: Dict[str, Any] = {}
+                    for _t_local, _t_elem in enumerate(_seg['pending_tables'], 1):
+                        _t_key = assign_table_key(_t_local, _seg_key, _tbl_taken)
+                        _tbl_taken.add(_t_key)
+                        placeholder = f"[Table {_t_local} pending sub-unit extraction]"
+                        final_marker = (
+                            f"[Table {_t_local} extracted as sub-unit"
+                            f" {_tbl_type_name} {_t_key}]"
+                        )
+                        for _i, _part in enumerate(_seg['text_parts']):
+                            if _part == placeholder:
+                                _seg['text_parts'][_i] = final_marker
+                                break
+                        _seg_tbl_sub_units[_t_key] = _build_xml_table_sub_unit(
+                            _t_elem, _t_local, _seg_context, _ms_type_name, _seg_key
+                        )
+                        _seg_tbl_sub_units[_t_key]['placeholder'] = final_marker
+                        _seg_tbl_index[_t_key] = {
+                            "container_plural": name_plural,
+                            "container_id": item_id,
+                            "path": [_ms_key_str, _seg_key],
+                        }
+
+                    # Segments with no prose and no tables (e.g. "[Reserved]" entries)
+                    # get a sentinel so Stage 3 produces a summary from unit_title.
+                    if not _seg['text_parts'] and not _seg_tbl_sub_units:
+                        _seg['text_parts'] = ['[No further unit content.]']
                     _seg_text, _seg_bps = assemble_text_and_breakpoints(_seg['text_parts'])
-                    _ms_sub_units[_seg_key] = {
+                    _seg_entry: Dict[str, Any] = {
                         "text": _seg_text,
                         "unit_title": _seg['title'],
                         "breakpoints": _seg_bps,
                         "context": _sub_unit_context,
                     }
+                    if _seg_tbl_sub_units:
+                        _seg_entry["sub_units"] = {_tbl_key_str: _seg_tbl_sub_units}
+                        _di["sub_unit_index"][_tbl_key_str].update(_seg_tbl_index)
+                        log_parsing_correction(
+                            "", "large_table_extraction",
+                            f"Extracted {len(_seg_tbl_sub_units)} large table(s) from "
+                            f"method section '{_seg_key}' of {item_name} '{item_id}'",
+                            parsing_logfile,
+                        )
+
+                    _ms_sub_units[_seg_key] = _seg_entry
                     _ms_index_entries[_seg_key] = {
                         "container_plural": name_plural,
                         "container_id": item_id,
                         "path": [item_id],
                     }
 
-                item_entry["sub_units"] = {_ms_key_str: _ms_sub_units}
+                # Assemble item_entry sub_units: method sections, plus any preamble tables.
+                _all_sub_units: Dict[str, Any] = {_ms_key_str: _ms_sub_units}
+                if _preamble_tbl_sub_units:
+                    _all_sub_units[_tbl_key_str] = _preamble_tbl_sub_units
+                    _di["sub_unit_index"][_tbl_key_str].update(_preamble_tbl_index)
+                    log_parsing_correction(
+                        "", "large_table_extraction",
+                        f"Extracted {len(_preamble_tbl_sub_units)} large table(s) from "
+                        f"preamble of {item_name} '{item_id}'",
+                        parsing_logfile,
+                    )
+
+                item_entry["sub_units"] = _all_sub_units
                 _di["sub_unit_index"][_ms_key_str].update(_ms_index_entries)
                 log_parsing_correction("", "method_section_subdivision",
                                        f"Subdivided {item_name} '{item_id}' into "
@@ -1895,9 +2017,11 @@ def parse_appendix(
                 xml_elem, local_num, item_entry["context"], item_name, item_id
             )
             # Replace the pending placeholder with the final key-based marker.
+            final_placeholder = f"[Table {local_num} extracted as sub-unit {table_type_name} {sub_unit_key}]"
+            sub_unit['placeholder'] = final_placeholder
             current_text = current_text.replace(
                 f"[Table {local_num} pending sub-unit extraction]",
-                f"[Table {local_num} extracted as sub-unit {table_type_name} {sub_unit_key}]",
+                final_placeholder,
             )
             table_sub_units[sub_unit_key] = sub_unit
             index_entries[sub_unit_key] = {
@@ -2550,7 +2674,14 @@ def extract_footnotes(elem: ET.Element) -> Dict[str, str]:
 
 
 def assemble_text_and_breakpoints(paragraphs: List[str]) -> Tuple[str, List[List[int]]]:
-    """Assemble paragraphs into text with breakpoints."""
+    """Assemble paragraphs into text with breakpoints.
+
+    Breakpoints are [position, priority] pairs where position is the character
+    offset of the first non-newline character of the paragraph.  Heading
+    formatters prefix paragraphs with '\\n' for visual separation; those leading
+    newlines are skipped when recording the breakpoint so it points to the
+    actual heading content, not a blank line.
+    """
     text = ""
     breakpoints: List[List[int]] = []
     for para in paragraphs:
@@ -2560,11 +2691,14 @@ def assemble_text_and_breakpoints(paragraphs: List[str]) -> Tuple[str, List[List
         if text:
             text += "\n"
             pos = len(text)
+        # Advance past any leading newlines so the breakpoint lands on real content.
+        leading = len(para) - len(para.lstrip('\n'))
+        bp_pos = pos + leading
         priority = 2
-        if re.match(r"^\(\w+\)", para.strip()):
+        if re.match(r"^\(\w+\)", para.lstrip('\n').strip()):
             priority = 1
         if pos > 0:
-            breakpoints.append([pos, priority])
+            breakpoints.append([bp_pos, priority])
         text += para
     return text, breakpoints
 

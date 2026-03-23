@@ -17,7 +17,13 @@ from utils.large_table_common import (
     find_or_create_table_param_key,
     build_table_sub_unit_from_html,
 )
-from utils.config import get_config, get_output_directory, get_output_structure
+from utils.definition_list_common import (
+    find_or_create_definition_list_param_key,
+    assign_definition_list_key,
+    build_definition_list_sub_unit,
+    title_contains_definition,
+)
+from utils.config import get_config, get_output_directory, get_output_structure, get_definition_list_thresholds
 from utils.manifest_utils import ManifestManager, get_manifest_path
 
 
@@ -86,7 +92,7 @@ def get_element_text(element, allow_notes=True, list_marker='', list_level=0, pr
     # Same as get_element_text2, except it returns only the text string.
     return get_element_text2(element, allow_notes, list_marker, list_level, prev_line_return)[0]
 
-def get_element_text2(element, allow_notes=True, list_marker='', list_level=0, prev_line_return=False, pending_large_tables=None):
+def get_element_text2(element, allow_notes=True, list_marker='', list_level=0, prev_line_return=False, pending_large_tables=None, pending_definition_lists=None):
     # Main function for iteratively fetching text from a node.
     # For many node types, just use the .text structure, but deal with specific
     # node types that need special handling.
@@ -185,9 +191,17 @@ def get_element_text2(element, allow_notes=True, list_marker='', list_level=0, p
                     down_breakpoints = []
                     down_notes = {}
                 else:
-                    down_result, down_breakpoints, down_notes = get_element_text2(child, allow_notes, list_marker, list_level, prev_line_return, pending_large_tables)
+                    down_result, down_breakpoints, down_notes = get_element_text2(child, allow_notes, list_marker, list_level, prev_line_return, pending_large_tables, pending_definition_lists)
+            # XML-level definition-list interception: defer qualifying LIST elements to sub-unit extraction
+            elif (pending_definition_lists is not None and child.tag and child.tag.upper() == 'LIST'
+                  and id(child) in pending_definition_lists['to_intercept']):
+                pending_definition_lists['lists'].append(child)
+                local_num = len(pending_definition_lists['lists'])
+                down_result = f"[Definition list {local_num} pending sub-unit extraction]"
+                down_breakpoints = []
+                down_notes = {}
             else:
-                down_result, down_breakpoints, down_notes = get_element_text2(child, allow_notes, list_marker, list_level, prev_line_return, pending_large_tables)
+                down_result, down_breakpoints, down_notes = get_element_text2(child, allow_notes, list_marker, list_level, prev_line_return, pending_large_tables, pending_definition_lists)
             initial_result_size = len(result)
             result += down_result
             # Handle adding breakpoints from below to our current set of breakpoints.
@@ -289,9 +303,11 @@ def _register_pending_large_tables(
         sub_unit = _build_formex_table_sub_unit(
             tgroup_elem, local_num, parent_context, parent_type_name, parent_id, parsed_content
         )
+        final_placeholder = f"[Table {local_num} extracted as sub-unit {table_type_name} {sub_unit_key}]"
+        sub_unit['placeholder'] = final_placeholder
         current_text = current_text.replace(
             f"[Table {local_num} pending sub-unit extraction]",
-            f"[Table {local_num} extracted as sub-unit {table_type_name} {sub_unit_key}]",
+            final_placeholder,
         )
         table_sub_units[sub_unit_key] = sub_unit
         index_entries[sub_unit_key] = {
@@ -321,10 +337,10 @@ def _build_formex_table_sub_unit(tgroup_elem, local_counter, parent_context, par
     )
 
 
-def add_text_brkpts_notes(item_pointer, node, note_flag=True, pending_large_tables=None):
+def add_text_brkpts_notes(item_pointer, node, note_flag=True, pending_large_tables=None, pending_definition_lists=None):
     # Take the item_pointer within the content structure and place within the
     # text, breakpoints, and notes fields the output from the get_element_text2 function.
-    element_text, breakpoints, notes = get_element_text2(node, note_flag, pending_large_tables=pending_large_tables)
+    element_text, breakpoints, notes = get_element_text2(node, note_flag, pending_large_tables=pending_large_tables, pending_definition_lists=pending_definition_lists)
     text_size = len(item_pointer['text'])
     item_pointer['text'] += element_text + '\n'
     # Calculate breakpoint offsets, and add them to the content structure.
@@ -495,6 +511,154 @@ def get_title_from_sub_doc(tree, parsed_content, directory):
                     return short_title
                     break            
 
+def _find_qualifying_list_elements(article_node, min_items, min_chars):
+    """
+    Pre-scan an article element for LIST elements that qualify for definition-list
+    sub-unit extraction.
+
+    Returns a set of Python id() values for qualifying LIST elements.  Using id()
+    avoids the cost of storing element references in a second structure and makes
+    O(1) lookup inside get_element_text2.
+
+    A LIST qualifies when it has >= min_items direct <ITEM> children AND the total
+    character length of those items' text >= min_chars.
+    """
+    qualifying = set()
+    for list_elem in article_node.iter():
+        if not (list_elem.tag and list_elem.tag.upper() == 'LIST'):
+            continue
+        items = [c for c in list_elem if c.tag and c.tag.upper() == 'ITEM']
+        if len(items) < min_items:
+            continue
+        total_chars = sum(len(get_element_text(item)) for item in items)
+        if total_chars >= min_chars:
+            qualifying.add(id(list_elem))
+    return qualifying
+
+
+def _extract_definition_list_text_and_breakpoints(list_elem):
+    """
+    Build the sub-unit text and item-boundary breakpoints for a LIST element.
+
+    Iterates <ITEM> children, calling get_element_text2 on each to produce the
+    same text that the normal traversal would produce.  Records a [offset, 1]
+    breakpoint at the start of each item after the first.
+
+    Returns (text, breakpoints).
+    """
+    list_type = list_elem.attrib.get('TYPE', '') if list_elem.attrib else ''
+    if list_type in ['DASH', 'NDASH']:
+        list_marker = '-- '
+    elif list_type in ['BULLET', 'OTHER']:
+        list_marker = '* '
+    else:
+        list_marker = ''
+
+    full_text = ''
+    breakpoints = []
+    first_item = True
+    for child in list_elem:
+        if not (child.tag and child.tag.upper() == 'ITEM'):
+            continue
+        if not first_item:
+            breakpoints.append([len(full_text), 1])
+        prev_line_return = (full_text == '' or full_text.endswith('\n'))
+        item_text, _, _ = get_element_text2(
+            child, list_marker=list_marker, list_level=1,
+            prev_line_return=prev_line_return,
+        )
+        full_text += item_text
+        first_item = False
+    return full_text.rstrip(), breakpoints
+
+
+def _register_pending_definition_lists(
+    parsed_content,
+    item_pointer,
+    pending_definition_lists,
+    parent_type_name,
+    parent_id,
+    name_plural,
+    file_path=None,
+    parsing_logfile=None,
+):
+    """
+    Register XML-intercepted definition-list elements as sub-units on the item.
+
+    Mirrors _register_pending_large_tables.  For each intercepted LIST:
+    - Extracts item text and item-boundary breakpoints.
+    - Derives chunk_prefix from the parent text before the placeholder.
+    - Builds a definition_list sub-unit dict with placeholder and chunk_prefix fields.
+    - Replaces the temporary placeholder in item_pointer['text'] with the final one.
+    - Updates sub_unit_index.
+    """
+    lists = pending_definition_lists.get('lists', [])
+    if not lists:
+        return
+    param_pointer = parsed_content['document_information']['parameters']
+    dl_param_key = find_or_create_definition_list_param_key(param_pointer)
+    dl_type_name = param_pointer[dl_param_key]['name']
+    dl_key_str = str(dl_param_key)
+    di = parsed_content['document_information']
+    di.setdefault('sub_unit_index', {})
+    di['sub_unit_index'].setdefault(dl_key_str, {})
+    taken = set(di['sub_unit_index'][dl_key_str].keys())
+
+    parent_context = item_pointer.get('context', [])
+    current_text = item_pointer['text']
+
+    # Accumulate sub-units; merge into existing sub_units dict if tables were also extracted.
+    dl_sub_units = {}
+    index_entries = {}
+
+    for local_num, list_elem in enumerate(lists, 1):
+        sub_unit_key = assign_definition_list_key(local_num, parent_id, taken)
+        taken.add(sub_unit_key)
+
+        # Build sub-unit text and breakpoints from the LIST's ITEM children.
+        dl_text, dl_breakpoints = _extract_definition_list_text_and_breakpoints(list_elem)
+
+        # The temporary placeholder is the text that was emitted during traversal.
+        temp_placeholder = f"[Definition list {local_num} pending sub-unit extraction]"
+
+        # Derive chunk_prefix from the parent text before the placeholder.
+        # Format it as a scope label so the model understands the definitional context.
+        # The parser owns this format decision; processing stages prepend chunk_prefix verbatim.
+        placeholder_pos = current_text.find(temp_placeholder)
+        if placeholder_pos >= 0:
+            preamble = current_text[:placeholder_pos].strip()
+            chunk_prefix = f'[Scope: "{preamble}"]' if preamble else ''
+        else:
+            chunk_prefix = ''
+
+        # Final placeholder references the sub-unit type name and key.
+        final_placeholder = f"[Definition list {local_num} extracted as sub-unit {dl_type_name} {sub_unit_key}]"
+
+        sub_unit = build_definition_list_sub_unit(
+            dl_text, dl_breakpoints, chunk_prefix, final_placeholder,
+            parent_context, parent_type_name, parent_id,
+        )
+        current_text = current_text.replace(temp_placeholder, final_placeholder)
+
+        dl_sub_units[sub_unit_key] = sub_unit
+        index_entries[sub_unit_key] = {
+            "container_plural": name_plural,
+            "container_id": parent_id,
+            "path": [parent_id],
+        }
+
+    item_pointer['text'] = current_text
+
+    # Merge into sub_units: may already have table sub-units under a different key.
+    item_pointer.setdefault('sub_units', {})
+    item_pointer['sub_units'][dl_key_str] = dl_sub_units
+    di['sub_unit_index'][dl_key_str].update(index_entries)
+
+    log_parsing_correction(file_path or "", "definition_list_extraction",
+                           f"Extracted {len(dl_sub_units)} definition list(s) from "
+                           f"{parent_type_name} '{parent_id}'", parsing_logfile)
+
+
 def extract_articles(tree, parsed_content, parent_map, org_keyword_set, file_path=None, parsing_logfile=None):
     # Get the articles from the ENACTING.TERMS node(s).
     art_pointer = parsed_content['content']['articles']
@@ -531,9 +695,17 @@ def extract_articles(tree, parsed_content, parent_map, org_keyword_set, file_pat
             art_pointer[art_num]['notes'] = {}
             # Now, find the text portion.  We need to find all text that is not at the top-level TI.ART or STI.ART elements.
             pending_large_tables = []
+            # If the article title contains "definition(s)", pre-scan for qualifying LIST elements
+            # so they can be intercepted and extracted as definition-list sub-units.
+            pending_definition_lists = None
+            if title_contains_definition(art_title):
+                min_items, min_chars = get_definition_list_thresholds(parser='formex')
+                qualifying = _find_qualifying_list_elements(article_node, min_items, min_chars)
+                if qualifying:
+                    pending_definition_lists = {'to_intercept': qualifying, 'lists': []}
             for child in article_node:
                 if not child.tag is None and not 'TI.ART' == child.tag and not 'STI.ART' == child.tag:
-                    add_text_brkpts_notes(art_pointer[art_num], child, True, pending_large_tables)
+                    add_text_brkpts_notes(art_pointer[art_num], child, True, pending_large_tables, pending_definition_lists)
             art_pointer[art_num]['text'] = art_pointer[art_num]['text'].rstrip()
             # Remove any breakpoints that are now after the end of the text (since the rstrip may have removed non-printing characters at the end).
             while len(art_pointer[art_num]['breakpoints']) > 0: # It is possible that there are multiple breakpoints at the end that need to be removed.
@@ -547,6 +719,12 @@ def extract_articles(tree, parsed_content, parent_map, org_keyword_set, file_pat
                 parsed_content, art_pointer[art_num], pending_large_tables,
                 'article', art_num, 'articles', file_path, parsing_logfile
             )
+            # Register XML-intercepted definition lists as sub-units
+            if pending_definition_lists:
+                _register_pending_definition_lists(
+                    parsed_content, art_pointer[art_num], pending_definition_lists,
+                    'article', art_num, 'articles', file_path, parsing_logfile
+                )
             # Now, add begin_article and stop_article markers to the organizational information.
             add_substantive_markers_org(parsed_content, art_pointer[art_num]['context'], 'article', art_num)
 
@@ -662,11 +840,17 @@ def extract_annexes(tree, parsed_content, org_keyword_set, file_path=None, parsi
         annex_pointer[annex_num]['notes'] = {}
         # Now, find the text portion.  We need to find all text that is not at the top-level TI.ART or STI.ART elements.
         pending_large_tables = []
+        pending_definition_lists = None
+        if title_contains_definition(annex_title):
+            min_items, min_chars = get_definition_list_thresholds(parser='formex')
+            qualifying = _find_qualifying_list_elements(annex_node, min_items, min_chars)
+            if qualifying:
+                pending_definition_lists = {'to_intercept': qualifying, 'lists': []}
         for content_node in get_all_elements(annex_node, 'CONTENTS'):
-            add_text_brkpts_notes(annex_pointer[annex_num], content_node, True, pending_large_tables)
+            add_text_brkpts_notes(annex_pointer[annex_num], content_node, True, pending_large_tables, pending_definition_lists)
             # annex_pointer[annex_num]['text'] += get_element_text(content_node)
         if '' == annex_pointer[annex_num]['text']: # As a fallback, if there is no CONTENTS node, just use the whole ANNEX node.
-            add_text_brkpts_notes(annex_pointer[annex_num], annex_node, True, pending_large_tables)
+            add_text_brkpts_notes(annex_pointer[annex_num], annex_node, True, pending_large_tables, pending_definition_lists)
             log_parsing_correction(file_path, "annex_text_fallback", 
                                  f"Used full ANNEX node for text extraction (no CONTENTS) for annex '{annex_num}'", 
                                  parsing_logfile)
@@ -686,6 +870,12 @@ def extract_annexes(tree, parsed_content, org_keyword_set, file_path=None, parsi
             parsed_content, annex_pointer[annex_num], pending_large_tables,
             'annex', annex_num, 'annexes', file_path, parsing_logfile
         )
+        # Register XML-intercepted definition lists as sub-units
+        if pending_definition_lists:
+            _register_pending_definition_lists(
+                parsed_content, annex_pointer[annex_num], pending_definition_lists,
+                'annex', annex_num, 'annexes', file_path, parsing_logfile
+            )
         # Now, add begin_annex and stop_annex markers to the organizational information.
         add_substantive_markers_org(parsed_content, annex_pointer[annex_num]['context'], 'annex', annex_num)
 

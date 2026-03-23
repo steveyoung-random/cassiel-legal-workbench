@@ -260,6 +260,78 @@ def create_client_for_task(config: dict, task_name: str):
     return create_ai_client(model_name=model_name, config=config)
 
 
+def get_definition_list_thresholds(parser: str = None, config: dict = None) -> tuple:
+    """
+    Get thresholds for definition-list sub-unit extraction.
+
+    Args:
+        parser: Parser name (e.g. 'formex', 'uslm').  When given, looks up
+                processing.definition_list_thresholds.<parser> in config.json.
+                Falls back to hard-coded defaults if the parser key is absent.
+        config: Optional pre-loaded config dict; loaded from disk if None.
+
+    Returns:
+        (min_items, min_chars): A qualifying list element must have at least
+        min_items list-item children AND total text >= min_chars.
+        Defaults: 5 items, 4000 chars.
+    """
+    if config is None:
+        config = get_config()
+    processing = config.get('processing', {})
+    if parser:
+        entry = processing.get('definition_list_thresholds', {}).get(parser, {})
+        min_items = entry.get('min_items', 5)
+        min_chars = entry.get('min_chars', 4000)
+    else:
+        min_items = processing.get('definition_list_min_items', 5)
+        min_chars = processing.get('definition_list_min_chars', 4000)
+    return min_items, min_chars
+
+
+def get_cumulative_summary_list_max_chars(config: dict = None) -> int:
+    """
+    Get maximum character count for the cumulative_summary_list in Stage 3 level-1 processing.
+
+    When the list exceeds this threshold, oldest entries are trimmed from the front.
+
+    Returns:
+        int: Maximum character count (default: 30000)
+    """
+    if config is None:
+        config = get_config()
+    return config.get('processing', {}).get('cumulative_summary_list_max_chars', 30000)
+
+
+def get_org_summary_batch_threshold(config: dict = None) -> int:
+    """
+    Get threshold for batching in organization_summaries.
+
+    When the combined child summaries string exceeds this threshold, the call is
+    split into batches with an interim summary per batch and a final synthesis.
+
+    Returns:
+        int: Maximum character count before batching (default: 40000)
+    """
+    if config is None:
+        config = get_config()
+    return config.get('processing', {}).get('org_summary_batch_threshold', 40000)
+
+
+def get_level2_tool_use_threshold(config: dict = None) -> int:
+    """
+    Get threshold for switching to tool-use path in level_2_summaries.
+
+    When len(context_string) + len(table_of_contents) exceeds this threshold,
+    the front-loaded context block is replaced with AI-callable lookup tools.
+
+    Returns:
+        int: Maximum character count before tool-use path (default: 40000)
+    """
+    if config is None:
+        config = get_config()
+    return config.get('processing', {}).get('level2_tool_use_threshold', 40000)
+
+
 def get_qa_mode_config(mode_name: str = None, config: dict = None) -> dict:
     """
     Get configuration for a Q&A mode. Returns default if mode not found.

@@ -17,7 +17,7 @@ from utils.large_table_common import (
     find_or_create_table_param_key,
     build_table_sub_unit_from_html,
 )
-from utils.config import get_config, get_output_directory, get_output_structure, get_parse_mode
+from utils.config import get_config, get_output_directory, get_output_structure, get_parse_mode, create_client_for_task, get_definition_list_thresholds
 from utils.manifest_utils import ManifestManager, get_manifest_path, create_title_output_dir
 
 def get_parsing_issues_logfile(dir_path=''):
@@ -140,9 +140,11 @@ def _register_uslm_large_tables(content, item_pointer, pending_large_tables, sec
         sub_unit = _build_uslm_table_sub_unit(
             table_elem, local_num, org_context, 'section', section_id
         )
+        final_placeholder = f"[Table {local_num} extracted as sub-unit {table_type_name} {sub_unit_key}]"
+        sub_unit['placeholder'] = final_placeholder
         current_text = current_text.replace(
             f"[Table {local_num} pending sub-unit extraction]",
-            f"[Table {local_num} extracted as sub-unit {table_type_name} {sub_unit_key}]",
+            final_placeholder,
         )
         table_sub_units[sub_unit_key] = sub_unit
         index_entries[sub_unit_key] = {
@@ -158,6 +160,210 @@ def _register_uslm_large_tables(content, item_pointer, pending_large_tables, sec
         parsing_logfile)
 
 
+def _check_definition_list_candidate(element, logfile):
+    """
+    Four-stage gate: returns the chapeau text (str) if element qualifies for
+    definition-list extraction, or None if it does not.
+    Thresholds are read from config.json (processing.definition_list_thresholds.uslm).
+
+    Stages:
+      1. Length gate  — total itertext() chars >= min_chars (config: uslm min_chars, default 6000)
+      2. Chapeau gate — element has a direct <chapeau> child
+      3. Count gate   — element has >= min_items direct <paragraph> children (config: uslm min_items, default 5)
+      4. AI gate      — cheap binary confirmation (task 'stage1.definitions.detect_definition_list')
+    """
+    config = get_config()
+    min_items, min_chars = get_definition_list_thresholds(parser='uslm', config=config)
+
+    # Stage 1: length gate (cheapest — just iterate text)
+    total_chars = sum(len(s) for s in element.itertext())
+    if total_chars < min_chars:
+        return None
+
+    # Stage 2: chapeau gate
+    chapeau = None
+    for child in element:
+        if child.tag and child.tag.lower() == 'chapeau':
+            chapeau = child
+            break
+    if chapeau is None:
+        return None
+
+    # Stage 3: paragraph count gate
+    para_children = [c for c in element if c.tag and c.tag.lower() == 'paragraph']
+    if len(para_children) < min_items:
+        return None
+
+    # Stage 4: AI confirmation
+    chapeau_text = get_element_text(chapeau).strip()
+    sample_texts = ''.join(
+        get_element_text(p) for p in para_children[:min_items]
+    ).strip()
+    excerpt = chapeau_text + '\n' + sample_texts
+
+    client = create_client_for_task(config, 'stage1.definitions.detect_definition_list')
+    prompt = (
+        'Does the following statutory excerpt contain a list in which EACH paragraph '
+        'defines a SEPARATE, DISTINCT term?\n'
+        '\n'
+        'Answer true only if: (a) the introductory text (chapeau) sets a scope or '
+        'context for what follows, and (b) each numbered or lettered item defines a '
+        'different term.\n'
+        '\n'
+        'Answer false if: the chapeau itself begins the definition of a single term '
+        '(e.g. "The term \'X\' means...") and the items are conditions, criteria, '
+        'exceptions, or enumerated elements of that one definition — even if the '
+        'section is headed "Definitions". Also answer false if the list is not about '
+        'defining terms at all (e.g. a list of duties, findings, or requirements).\n'
+        '\n'
+        'Answer with JSON only: {"is_definition_list": true} or '
+        '{"is_definition_list": false}.\n\n'
+        + excerpt
+    )
+    try:
+        result = query_json(
+            client, [], prompt, logfile,
+            max_tokens=50,
+            expected_keys=['is_definition_list'],
+            config=config,
+            task_name='stage1.definitions.detect_definition_list',
+        )
+        # query_json returns json.loads() of the model response.
+        # The prompt requests a plain dict {"is_definition_list": ...}, so the
+        # result is a dict.  Guard against a list-wrapped dict just in case.
+        if isinstance(result, dict):
+            qualifies = bool(result.get('is_definition_list', False))
+        elif isinstance(result, list) and result and isinstance(result[0], dict):
+            qualifies = bool(result[0].get('is_definition_list', False))
+        else:
+            qualifies = False
+        return chapeau_text if qualifies else None
+    except Exception:
+        pass
+    return None
+
+
+def _find_qualifying_definition_paragraphs(element, logfile):
+    """
+    Scan a <section> element for a qualifying definition-list sub-unit.
+
+    Checks the section element itself (section-level paragraph lists) first,
+    then each direct <subsection> child (subsection-level lists).
+
+    Returns (paragraphs_set, chapeau_text) where paragraphs_set is the set of
+    <paragraph> element objects to intercept (membership tested with
+    ``child in to_intercept``) and chapeau_text is the scope preamble string.
+    Returns (empty set, '') if nothing qualifies.
+    """
+    # Section-level: paragraphs directly under this element
+    chapeau_text = _check_definition_list_candidate(element, logfile)
+    if chapeau_text is not None:
+        paras = [c for c in element if c.tag and c.tag.lower() == 'paragraph']
+        if paras:
+            # Use element objects as set members — lxml elements are hashable by
+            # XML node identity (not proxy address), so membership tests are reliable
+            # across different proxy accesses to the same underlying node.
+            return set(paras), chapeau_text
+
+    # Subsection-level: paragraphs under a <subsection> child
+    for child in element:
+        if child.tag and child.tag.lower() == 'subsection':
+            chapeau_text = _check_definition_list_candidate(child, logfile)
+            if chapeau_text is not None:
+                paras = [c for c in child if c.tag and c.tag.lower() == 'paragraph']
+                if paras:
+                    return set(paras), chapeau_text
+
+    return set(), ''
+
+
+def _extract_uslm_definition_text_and_breakpoints(paragraphs):
+    """
+    Build the sub-unit text and paragraph-boundary breakpoints from a list of
+    intercepted <paragraph> elements.
+
+    Calls get_element_text2 on each paragraph (same text as normal traversal).
+    Records a [offset, 1] breakpoint at the start of each paragraph after the first.
+
+    Returns (text, breakpoints).
+    """
+    full_text = ''
+    breakpoints = []
+    first_para = True
+    for para in paragraphs:
+        if not first_para:
+            breakpoints.append([len(full_text), 1])
+        prev_line_return = (full_text == '' or full_text.endswith('\n'))
+        para_text, _, _ = get_element_text2(para, prev_line_return=prev_line_return)
+        full_text += para_text
+        first_para = False
+    return full_text.rstrip(), breakpoints
+
+
+def _register_uslm_definition_lists(
+    content, item_pointer, pending_definition_lists, section_id, org_context,
+    parsing_logfile=None,
+):
+    """
+    Register intercepted definition-list paragraphs as a definition_list sub-unit.
+
+    Mirrors _register_uslm_large_tables.  Derives chunk_prefix from the text
+    that precedes the temporary placeholder in item_pointer['text'] (i.e., the
+    chapeau/scope preamble rendered during get_element_text2 traversal).
+    """
+    if not pending_definition_lists or not pending_definition_lists.get('paragraphs'):
+        return
+
+    paragraphs = pending_definition_lists['paragraphs']
+    param_pointer = content['document_information']['parameters']
+    dl_param_key = find_or_create_definition_list_param_key(param_pointer)
+    dl_type_name = param_pointer[dl_param_key]['name']
+    dl_key_str = str(dl_param_key)
+    di = content['document_information']
+    di.setdefault('sub_unit_index', {})
+    di['sub_unit_index'].setdefault(dl_key_str, {})
+    taken = set(di['sub_unit_index'][dl_key_str].keys())
+
+    local_num = 1  # at most one definition list per section
+    sub_unit_key = assign_definition_list_key(local_num, section_id, taken)
+    taken.add(sub_unit_key)
+
+    dl_text, dl_breakpoints = _extract_uslm_definition_text_and_breakpoints(paragraphs)
+
+    # Use the chapeau text captured at pre-scan time as the chunk_prefix.
+    # This gives precisely the scope/preamble sentence rather than all preceding text.
+    chapeau_text = pending_definition_lists.get('chapeau_text', '')
+    chunk_prefix = f'[Scope: "{chapeau_text}"]' if chapeau_text else ''
+
+    final_placeholder = (
+        f"[Definition list {local_num} extracted as sub-unit {dl_type_name} {sub_unit_key}]"
+    )
+
+    parent_context = item_pointer.get('context', [])
+    sub_unit = build_definition_list_sub_unit(
+        dl_text, dl_breakpoints, chunk_prefix, final_placeholder,
+        parent_context, 'section', section_id,
+    )
+    temp_placeholder = f"[Definition list {local_num} pending sub-unit extraction]"
+    item_pointer['text'] = item_pointer['text'].replace(temp_placeholder, final_placeholder)
+
+    index_entries = {sub_unit_key: {
+        "container_plural": "sections",
+        "container_id": section_id,
+        "path": [section_id],
+    }}
+    # Merge into existing sub_units dict (may already have table sub-units)
+    if 'sub_units' not in item_pointer:
+        item_pointer['sub_units'] = {}
+    item_pointer['sub_units'][dl_key_str] = {sub_unit_key: sub_unit}
+    di['sub_unit_index'][dl_key_str].update(index_entries)
+    log_parsing_correction(
+        "", "definition_list_extraction",
+        f"Extracted definition list from section '{section_id}'",
+        parsing_logfile,
+    )
+
+
 def get_indent_from_identifier(identifier):
     result = None
     result = max(0, int(identifier.count('/')) - 4)
@@ -165,7 +371,7 @@ def get_indent_from_identifier(identifier):
 
 # Note: deduplicate_breakpoints and remove_blank_lines are now imported from utils.text_processing
 
-def get_element_text2(element, allow_notes=True, list_marker='', list_level=0, prev_line_return=False, pending_large_tables=None):
+def get_element_text2(element, allow_notes=True, list_marker='', list_level=0, prev_line_return=False, pending_large_tables=None, pending_definition_lists=None):
     # Main function for iteratively fetching text from a node.
     # For many node types, just use the .text structure, but deal with specific
     # node types that need special handling.
@@ -174,6 +380,11 @@ def get_element_text2(element, allow_notes=True, list_marker='', list_level=0, p
     # prev_line_return indicates whether the immediately preceding text from an element calling this one ends with a line return.
     # pending_large_tables: optional list; when provided, large table elements (>= LARGE_TABLE_ROW_THRESHOLD rows)
     #   are appended here and replaced with placeholders instead of being converted to text.
+    # pending_definition_lists: optional dict with keys 'to_intercept' (set of element objects,
+    #   tested with ``child in to_intercept`` — NOT id() values), 'paragraphs' (list),
+    #   'placeholder_emitted' (bool); when provided, <paragraph> elements in to_intercept are
+    #   intercepted: the first emits a placeholder, the rest are silently consumed.
+    #   Their text is later extracted by _extract_uslm_definition_text_and_breakpoints.
 
     result = ''
     breakpoints = []
@@ -273,9 +484,24 @@ def get_element_text2(element, allow_notes=True, list_marker='', list_level=0, p
                     down_breakpoints = []
                     down_notes = {}
                 else:
-                    down_result, down_breakpoints, down_notes = get_element_text2(child, allow_notes, list_marker, list_level, prev_line_return, pending_large_tables)
+                    down_result, down_breakpoints, down_notes = get_element_text2(child, allow_notes, list_marker, list_level, prev_line_return, pending_large_tables, pending_definition_lists)
+            # Definition-list interception: first qualifying paragraph emits placeholder;
+            # subsequent ones are silently consumed (collected into pending_definition_lists).
+            # Use `child in to_intercept` (not id()) — lxml elements are hashable by
+            # XML node identity, so membership tests work reliably across proxy accesses.
+            elif (pending_definition_lists is not None
+                  and child.tag and child.tag.lower() == 'paragraph'
+                  and child in pending_definition_lists['to_intercept']):
+                pending_definition_lists['paragraphs'].append(child)
+                if not pending_definition_lists['placeholder_emitted']:
+                    down_result = "[Definition list 1 pending sub-unit extraction]"
+                    pending_definition_lists['placeholder_emitted'] = True
+                else:
+                    down_result = ''  # silently consumed
+                down_breakpoints = []
+                down_notes = {}
             else:
-                down_result, down_breakpoints, down_notes = get_element_text2(child, allow_notes, list_marker, list_level, prev_line_return, pending_large_tables)
+                down_result, down_breakpoints, down_notes = get_element_text2(child, allow_notes, list_marker, list_level, prev_line_return, pending_large_tables, pending_definition_lists)
             initial_result_size = len(result)
             result += down_result
             # Handle adding breakpoints from below to our current set of breakpoints.
@@ -406,7 +632,15 @@ def process_section_element(element, content, id_dict, org_context, parsing_logf
     breakpoints = []
     notes = {}
     pending_large_tables = []
-    section_text, breakpoints, notes = get_element_text2(element, True, '', 0, True, pending_large_tables)  # Use True for prev_line_return to avoid starting with an immediate line return.
+    # Pre-scan for a qualifying definition-list sub-unit (four-stage gate).
+    # Done before get_element_text2 so the id() set is ready for interception.
+    to_intercept, dl_chapeau_text = _find_qualifying_definition_paragraphs(element, parsing_logfile)
+    pending_definition_lists = (
+        {'to_intercept': to_intercept, 'paragraphs': [], 'placeholder_emitted': False,
+         'chapeau_text': dl_chapeau_text}
+        if to_intercept else None
+    )
+    section_text, breakpoints, notes = get_element_text2(element, True, '', 0, True, pending_large_tables, pending_definition_lists)  # Use True for prev_line_return to avoid starting with an immediate line return.
     # Adjust to remove blank lines.
     section_text, breakpoints = remove_blank_lines(section_text, breakpoints)
     # Remove duplicate breakpoint locations, keeping the one with lowest priority for each location.
@@ -425,7 +659,10 @@ def process_section_element(element, content, id_dict, org_context, parsing_logf
 
     # Register XML-intercepted large tables as sub-units
     _register_uslm_large_tables(content, content_pointer[local_num_value], pending_large_tables, local_num_value, org_context, parsing_logfile)
-    
+
+    # Register intercepted definition-list paragraphs as a sub-unit (if any)
+    _register_uslm_definition_lists(content, content_pointer[local_num_value], pending_definition_lists, local_num_value, org_context, parsing_logfile)
+
     # Use the organizational context passed down from parent elements
     content_pointer[local_num_value]['context'] = org_context
     

@@ -1,47 +1,48 @@
 {
   "_comment": "Copy this file to config.json and adjust as needed. config.json is excluded from version control.",
 
+  "_comment_models": "Define all AI models you want to use. The key is the name used throughout config.json to reference this model. 'platform' must be 'OpenAI' or 'Claude'. 'model' is the API model identifier sent to the provider.",
   "models": {
-        "claude-opus-4-5": {
-            "platform": "Claude",
-            "model": "claude-opus-4-5",
-            "max_tokens": 8000
-        },
-        "claude-sonnet-4-5": {
-            "platform": "Claude",
-            "model": "claude-sonnet-4-5",
-            "max_tokens": 8000
-        },
-        "claude-haiku-4-5": {
-            "platform": "Claude",
-            "model": "claude-haiku-4-5",
-            "max_tokens": 8000
-        },
-        "gpt-5": {
-            "platform": "OpenAI",
-            "model": "gpt-5",
-            "max_tokens": 8000
-        },
-        "gpt-5-mini": {
-            "platform": "OpenAI",
-            "model": "gpt-5-mini",
-            "max_tokens": 8000
-        },
-        "gpt-5-nano": {
-            "platform": "OpenAI",
-            "model": "gpt-5-nano",
-            "max_tokens": 8000
-        },
-        "gpt-5.1": {
-            "platform": "OpenAI",
-            "model": "gpt-5.1",
-            "max_tokens": 8000
-        },
-        "gpt-5.2": {
-            "platform": "OpenAI",
-            "model": "gpt-5.2",
-            "max_tokens": 8000
-        }
+    "claude-opus-4-5": {
+      "platform": "Claude",
+      "model": "claude-opus-4-5",
+      "max_tokens": 8000
+    },
+    "claude-sonnet-4-5": {
+      "platform": "Claude",
+      "model": "claude-sonnet-4-5",
+      "max_tokens": 8000
+    },
+    "claude-haiku-4-5": {
+      "platform": "Claude",
+      "model": "claude-haiku-4-5",
+      "max_tokens": 8000
+    },
+    "gpt-5": {
+      "platform": "OpenAI",
+      "model": "gpt-5",
+      "max_tokens": 8000
+    },
+    "gpt-5-mini": {
+      "platform": "OpenAI",
+      "model": "gpt-5-mini",
+      "max_tokens": 8000
+    },
+    "gpt-5-nano": {
+      "platform": "OpenAI",
+      "model": "gpt-5-nano",
+      "max_tokens": 8000
+    },
+    "gpt-5.1": {
+      "platform": "OpenAI",
+      "model": "gpt-5.1",
+      "max_tokens": 8000
+    },
+    "gpt-5.2": {
+      "platform": "OpenAI",
+      "model": "gpt-5.2",
+      "max_tokens": 8000
+    }
   },
 
   "_comment_current_engine": "Default model used for any task not explicitly assigned in model_assignments.",
@@ -50,6 +51,9 @@
   "model_assignments": {
     "_comment_available_tasks": "============================================================",
     "_comment_task_list": [
+      "STAGE 1: PARSING",
+      "  stage1.definitions.detect_definition_list  - AI confirmation gate for USLM definition-list sub-unit extraction",
+      "",
       "STAGE 2: DEFINITION EXTRACTION AND SCOPE RESOLUTION",
       "  stage2.definitions.extract_terms           - Extract defined terms from item text",
       "  stage2.definitions.extract_definition      - Extract definition for specific term",
@@ -67,6 +71,7 @@
       "",
       "STAGE 3: SUMMARIZATION",
       "  stage3.summary.organizational              - Generate organizational unit summary",
+      "  stage3.summary.organizational.batch_interim - Interim summary for one batch when org children exceed threshold",
       "  stage3.summary.level1                      - Generate level 1 item summary (basic)",
       "  stage3.summary.level1_with_references      - Generate level 1 with reference extraction",
       "  stage3.summary.level2                      - Generate level 2 item summary (detailed)",
@@ -91,6 +96,7 @@
     "_comment_example_assignments": "Example model assignments (uncomment and modify as needed):",
     "_example_stage3.summary.level2": "gpt-5",
     "_example_registry.resolution.ai": "claude-haiku-4-5",
+    "stage1.definitions.detect_definition_list": "gpt-5.2",
     "stage2.definitions.resolve_indirect": "gpt-5.2",
     "stage2.definitions.extract_scope_with_indirect": "gpt-5.2",
     "stage2.definitions.evaluate_quality": "gpt-5.2",
@@ -98,7 +104,7 @@
     "stage2.definitions.resolve_conflict": "gpt-5.2",
     "stage2.definitions.review_high_conflict": "claude-opus-4-5",
     "stage3.summary.topic_statement": "gpt-5.2",
-    "stage3.summary.table": "claude-sonnet-4-6",
+    "stage3.summary.table": "claude-sonnet-4-5",
     "qa.relevance.score": "gpt-5-mini",
     "qa.analysis.analyze_chunk": "gpt-5.2",
     "qa.synthesis.cleanup_scratch": "gpt-5.2",
@@ -126,25 +132,95 @@
     "_example_stage3.summary.topic_statement.fallback_models": ["gpt-5", "claude-sonnet-4-5", "gpt-5-mini"]
   },
 
+  "_comment_log_stem": "Base filename for log files written during processing (e.g. 'log' produces 'log_stage2.txt').",
   "log_stem": "log",
+
+  "_comment_similarity_threshold": "Minimum similarity score (0-100) for fuzzy-matching term names during definition scope resolution.",
   "similarity_threshold": 87,
+
+  "_comment_max_iteration_count": "Maximum Stage 2 processing rounds before halting (guards against infinite loops in conflict resolution).",
   "max_iteration_count": 3,
 
   "output": {
-    "_comment": "Directory where processed documents are stored. Supports ~ for home directory.",
+    "_comment": "directory: where processed documents are stored; supports ~ for home directory. structure: 'per_document' (one subdirectory per source file, recommended) or 'flat' (all files in one directory).",
     "directory": "~/document_analyzer_output",
     "structure": "per_document"
   },
 
+  "_comment_document_roots": "Used by the UI to scan for source documents. Each entry defines a named collection of source files the UI can browse and submit for processing. 'parser' must match a registered parser type (e.g. 'uslm', 'cfr', 'ca_html', 'formex'). 'path' is the directory to scan. 'display_name' is shown in the UI. 'scan_recursive' defaults to true. 'enabled' defaults to true.",
+  "document_roots": {
+    "_comment_example": "Remove this comment key and add real entries. Example:",
+    "_example_usc": {
+      "display_name": "US Code (USLM)",
+      "parser": "uslm",
+      "path": "~/documents/laws/usc",
+      "scan_recursive": true,
+      "enabled": true
+    },
+    "_example_cfr": {
+      "display_name": "Code of Federal Regulations",
+      "parser": "cfr",
+      "path": "~/documents/laws/cfr",
+      "scan_recursive": true,
+      "enabled": true
+    }
+  },
+
+  "_comment_job_queue": "Optional. Override the default job queue database path (default: <output.directory>/jobs.db). Useful if you want the queue database on a different volume from processed output.",
+  "job_queue": {
+    "_comment": "Uncomment 'database' to override the default path.",
+    "_example_database": "~/document_analyzer_output/jobs.db"
+  },
+
   "processing": {
+    "_comment_default_checkpoint_threshold": "Number of items to process before writing a checkpoint file. Higher values reduce checkpoint overhead but risk more lost work if interrupted.",
     "default_checkpoint_threshold": 30,
-    "default_parse_mode": "split_chapters"
+
+    "_comment_default_parse_mode": "How to handle multi-chapter documents: 'split_chapters' (one output file per chapter, recommended for large titles) or 'full_document' (single output file).",
+    "default_parse_mode": "split_chapters",
+
+    "_comment_cumulative_summary_list_max_chars": "Stage 3 level-1 summarization maintains a rolling list of prior section summaries as AI context. This caps the total character count of that list; oldest entries are dropped when the cap is exceeded. Increase if you want more context carried forward; decrease to reduce prompt size and cost.",
+    "cumulative_summary_list_max_chars": 30000,
+
+    "_comment_org_summary_batch_threshold": "Stage 3 organizational summary: when combined child-section summaries exceed this character count, the call is split into batches with an interim summary per batch and a final synthesis. Prevents oversized prompts for parts with many sections.",
+    "org_summary_batch_threshold": 40000,
+
+    "_comment_level2_tool_use_threshold": "Stage 3 level-2 summary: when the front-loaded context block (definitions + table of contents) exceeds this character count, it is replaced with AI-callable lookup tools. The AI requests only the definitions and TOC sections it needs, reducing prompt size.",
+    "level2_tool_use_threshold": 40000,
+
+    "_comment_definition_list_thresholds": "Per-parser thresholds for definition-list sub-unit extraction. min_items = minimum number of list entries; min_chars = minimum total text characters. Formex uses 4000 chars — EU legislative articles are concise and a qualifying list rarely exceeds that without being a genuine definitions article. USLM uses 6000 chars because USC sections often have dense preamble text that can push non-definition subsections past the 4000-char mark; the higher bar reduces false positives before the AI confirmation gate fires.",
+    "definition_list_thresholds": {
+      "formex": {
+        "min_items": 5,
+        "min_chars": 4000
+      },
+      "uslm": {
+        "min_items": 5,
+        "min_chars": 6000
+      }
+    }
   },
 
   "_comment_extract_refs_ai_pass": "Run AI resolution pass after Stage 3 (registry/post_stage3.py). Resolves citations with non-standard formatting that regex cannot parse. Uses model assigned to registry.resolution.ai. Default: false (regex-only resolution).",
   "extract_refs_ai_pass": false,
 
+  "_comment_question_answering_modes": "Named Q&A modes selectable at runtime with --mode. Each mode is a profile of settings controlling scoring depth, analysis passes, and scratch-document management. 'default_qa_mode' names the mode used when --mode is not specified.",
   "question_answering_modes": {
+    "_comment_mode_keys": [
+      "scoring_summary_level       - Which summary level to use for relevance scoring: 'summary_1' (faster) or 'summary_2' (more thorough)",
+      "org_summary_scoring         - Whether to score organizational units (parts, subparts) in addition to leaf sections",
+      "stop_after_scoring          - If true, return scored units without running analysis (quick relevance scan only)",
+      "max_analysis_passes         - Maximum number of analysis rounds over the scored unit set",
+      "quality_check_phase         - Whether to run a post-analysis quality check pass",
+      "analyze_zero_score_sections - Whether to analyze units scored 0 (not relevant) during the quality check pass",
+      "scoring_fallback_to_summary_2 - If summary_1 is unavailable for a unit, fall back to summary_2 for scoring",
+      "scoring_batch_max_chars     - Maximum combined characters per batch when scoring multiple units in one AI call",
+      "scoring_batch_max_items     - Maximum number of units per scoring batch",
+      "score_1_gate                - Gate score-1 units (low relevance): skip on first analysis pass, include in later passes only if no better answers found",
+      "deduplicate_new_facts       - Run end-of-round deduplication on newly added scratch facts",
+      "compact_after_additions     - Run scratch compaction after every N fact additions (0 = no interval compaction)",
+      "implicit_reference_detection - Detect implicit cross-references in analyst scratch facts and add referenced units to the analysis queue"
+    ],
     "quick_scan": {
       "scoring_summary_level": "summary_1",
       "org_summary_scoring": true,

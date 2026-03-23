@@ -1004,14 +1004,18 @@ def chunk_text(text, breakpoints, preferred_length=15000):
     if text == '':
         return
 
-    if preferred_length <= 0 or len(breakpoints) < 1:
+    if preferred_length <= 0:
         yield text
+        return
+
+    if len(breakpoints) < 1:
+        yield from _split_on_whitespace_boundaries(text, preferred_length)
         return
 
     # Get sorted unique breakpoint levels.
     levels = sorted(set(entry[1] for entry in breakpoints))
     if not levels:
-        yield text
+        yield from _split_on_whitespace_boundaries(text, preferred_length)
         return
 
     yield from _chunk_text_at_level(text, 0, len(text), breakpoints, levels, 0, preferred_length)
@@ -1037,8 +1041,9 @@ def _chunk_text_at_level(text, region_start, region_end, breakpoints, levels, le
         return
 
     if level_index >= len(levels):
-        # No more levels available; yield the region as-is.
-        yield text[region_start:region_end]
+        # No more breakpoint levels; apply whitespace-boundary fallback if oversized.
+        segment = text[region_start:region_end]
+        yield from _split_on_whitespace_boundaries(segment, preferred_length)
         return
 
     current_level = levels[level_index]
@@ -1102,12 +1107,93 @@ def _sub_chunk_segment(text, seg_start, seg_end, breakpoints, levels, next_level
     """
     Sub-chunk an oversized segment by trying the next breakpoint level.
 
-    If no further levels are available, yields the segment as-is.
+    If no further levels are available and the segment exceeds preferred_length,
+    falls back to splitting on paragraph/line/whitespace boundaries (in that
+    priority order), with a hard cut as last resort.
     """
     if next_level_index < len(levels):
         yield from _chunk_text_at_level(text, seg_start, seg_end, breakpoints, levels, next_level_index, preferred_length)
-    else:
-        yield text[seg_start:seg_end]
+        return
+
+    segment = text[seg_start:seg_end]
+    if len(segment) <= preferred_length:
+        yield segment
+        return
+
+    # No more breakpoint levels; apply paragraph-boundary fallback.
+    yield from _split_on_whitespace_boundaries(segment, preferred_length)
+
+
+def _split_on_whitespace_boundaries(text, preferred_length):
+    """
+    Split text into chunks of at most preferred_length characters using the
+    best available boundary in priority order:
+      1. paragraph break (\\n\\n)
+      2. line break (\\n)
+      3. any whitespace
+      4. hard cut at preferred_length (last resort)
+
+    Uses greedy accumulation: collect text until the next split point would
+    exceed preferred_length, then emit a chunk.
+    """
+    if len(text) <= preferred_length:
+        yield text
+        return
+
+    for delimiter in ('\n\n', '\n', None):
+        if delimiter is not None:
+            parts = text.split(delimiter)
+        else:
+            # Whitespace split (any whitespace run)
+            parts = re.split(r'(\s+)', text)
+
+        if len(parts) <= 1:
+            # No delimiter found; try next priority
+            continue
+
+        chunks = _greedy_join(parts, delimiter, preferred_length)
+        # Only use this split strategy if it actually splits the text
+        if len(chunks) > 1:
+            yield from chunks
+            return
+
+    # Last resort: hard cut
+    pos = 0
+    while pos < len(text):
+        yield text[pos:pos + preferred_length]
+        pos += preferred_length
+
+
+def _greedy_join(parts, delimiter, preferred_length):
+    """
+    Greedily join parts (split by delimiter) into chunks where each chunk
+    is at most preferred_length characters. Returns a list of chunk strings.
+
+    When delimiter is None (whitespace split), parts may alternate between
+    content and separator tokens; they are joined as-is.
+    """
+    chunks = []
+    current_parts = []
+    current_len = 0
+
+    sep = delimiter if delimiter is not None else ''
+
+    for part in parts:
+        # Length contribution of adding this part to current_parts
+        added_len = len(part) + (len(sep) if current_parts else 0)
+        if current_parts and current_len + added_len > preferred_length:
+            # Emit current accumulation
+            chunks.append(sep.join(current_parts) if delimiter is not None else ''.join(current_parts))
+            current_parts = [part]
+            current_len = len(part)
+        else:
+            current_parts.append(part)
+            current_len += added_len
+
+    if current_parts:
+        chunks.append(sep.join(current_parts) if delimiter is not None else ''.join(current_parts))
+
+    return chunks
 
 
 

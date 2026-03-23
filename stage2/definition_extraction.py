@@ -13,11 +13,26 @@ from utils import (
     build_defined_terms_prompt,
     build_definition_prompt,
     build_scope_prompt,
+    chunk_text,
 )
 from utils.processing_status import update_stage_2_progress
 from utils.text_processing import strip_emphasis_marks
 from utils.config import create_client_for_task
 from .processor import DefinitionsProcessor
+
+_STAGE2_CHUNK_SIZE = 15000  # preferred chunk length (consistent with Stage 3)
+
+
+def _build_item_cache_prompt(item_type_name, cap_item_type_name, item_number, chunk_prefix, text):
+    """Build the cache prompt for one chunk of item text."""
+    cp = ('You will be asked about definitions within this ' + item_type_name +
+          ' from a larger statute or legal document:\n\n***Begin ' + item_type_name + '***\n')
+    cp += cap_item_type_name + ' ' + item_number + ':\n'
+    if chunk_prefix:
+        cp += chunk_prefix + '\n\n'
+    cp += text
+    cp += '\n***End ' + item_type_name + '***\n\n'
+    return cp
 
 
 def find_defined_terms(proc: DefinitionsProcessor, count=30):
@@ -94,59 +109,78 @@ def find_defined_terms(proc: DefinitionsProcessor, count=30):
             continue
         if 'defined_terms' in working_item: # Already processed; skip
             continue
-        # Because we will be making several calls with the same text, it is a good idea to use caching.
-        cache_prompt = 'You will be asked about definitions within this '+ item_type_name + ' from a larger statute or legal document:\n\n***Begin ' + item_type_name + '***\n'
-        cache_prompt += cap_item_type_name + ' ' + item_number + ':\n'
-        cache_prompt += working_item['text']
-        cache_prompt += '\n***End ' + item_type_name + '***\n\n'
+        # Split into chunks using breakpoints (chunk_text yields full text as a single chunk
+        # when there are no breakpoints or the text is short — no threshold guard needed).
+        chunk_prefix = working_item.get('chunk_prefix', '')
+        item_text = working_item['text']
+        breakpoints = working_item.get('breakpoints', [])
+        chunks = list(chunk_text(item_text, breakpoints, preferred_length=_STAGE2_CHUNK_SIZE))
+        chunk_caches = [
+            _build_item_cache_prompt(item_type_name, cap_item_type_name, item_number, chunk_prefix, c)
+            for c in chunks
+        ]
+
+        # extract_terms: one call per chunk; record which chunk each term came from.
+        # First occurrence wins — avoids duplicates on the rare chance the same term
+        # name appears in output from multiple chunks.
+        term_to_chunk_idx = {}
         prompt = build_defined_terms_prompt(item_type_name)
-        terms_object = query_json(terms_client, [cache_prompt], prompt, proc.logfile, config=proc.config, task_name='stage2.definitions.extract_terms')
+        for chunk_idx, cache in enumerate(chunk_caches):
+            terms_object = query_json(terms_client, [cache], prompt, proc.logfile, config=proc.config, task_name='stage2.definitions.extract_terms')
+            for def_term in terms_object:
+                if isinstance(def_term, str) and def_term:
+                    def_term = strip_emphasis_marks(def_term)
+                    if def_term and def_term not in term_to_chunk_idx:
+                        term_to_chunk_idx[def_term] = chunk_idx
+
         if not 'defined_terms' in working_item.keys():
             working_item['defined_terms'] = []
             proc.dirty = 1
-        for def_term in terms_object:
-            if isinstance(def_term, str) and not '' == def_term:
-                def_term = strip_emphasis_marks(def_term)
-                prompt = build_definition_prompt(def_term, item_type_name, proc.type_list_or_string)
-                definition_object = query_json(definition_client, [cache_prompt], prompt, proc.logfile, config=proc.config, task_name='stage2.definitions.extract_definition')
-                if (len(definition_object) > 0 and
-                isinstance(definition_object, list) and
-                isinstance(definition_object[0], dict) and
-                'definition' in definition_object[0].keys()):
-                    definition = definition_object[0]['definition']
-                    indirect = ''
-                    if 'indirect' in definition_object[0].keys():
-                        indirect = definition_object[0]['indirect']
 
-                    # Determine which client and task name to use for scope extraction
-                    # Use specialized model for definitions with indirect references if configured
-                    if has_indirect_scope_model and indirect and indirect.strip():
-                        # Use the indirect-specific model
-                        active_scope_client = scope_with_indirect_client
-                        active_scope_task = 'stage2.definitions.extract_scope_with_indirect'
-                    else:
-                        # Use the regular scope extraction model
-                        active_scope_client = scope_client
-                        active_scope_task = 'stage2.definitions.extract_scope'
+        # Per-term extraction: use the cache for the chunk where the term was found.
+        # extract_definition and extract_scope share the same cached chunk context.
+        for def_term, chunk_idx in term_to_chunk_idx.items():
+            cache = chunk_caches[chunk_idx]
+            prompt = build_definition_prompt(def_term, item_type_name, proc.type_list_or_string)
+            definition_object = query_json(definition_client, [cache], prompt, proc.logfile, config=proc.config, task_name='stage2.definitions.extract_definition')
+            if (len(definition_object) > 0 and
+            isinstance(definition_object, list) and
+            isinstance(definition_object[0], dict) and
+            'definition' in definition_object[0].keys()):
+                definition = definition_object[0]['definition']
+                indirect = ''
+                if 'indirect' in definition_object[0].keys():
+                    indirect = definition_object[0]['indirect']
 
-                    prompt = build_scope_prompt(def_term, definition, item_type_name, proc.type_list_or_string, proc.org_item_name_string)
-                    scope_object = query_json(active_scope_client, [cache_prompt], prompt, proc.logfile, config=proc.config, task_name=active_scope_task)
-                    scope = ''
-                    if (len(scope_object) > 0 and
-                        isinstance(scope_object, list) and
-                        isinstance(scope_object[0], str) and
-                        len(scope_object[0]) > 0):
-                            scope = scope_object[0]
-                    print(def_term + ': ' + definition + ': ' + scope)
-                    def_kind = 'direct'
-                    if isinstance(definition_object[0], dict) and 'def_kind' in definition_object[0].keys():
-                        if isinstance(definition_object[0]['def_kind'], str) and definition_object[0]['def_kind'].strip() != '':
-                            def_kind = definition_object[0]['def_kind'].strip().lower()
-                            if def_kind not in ['direct', 'elaboration']:
-                                def_kind = 'direct'
-                    def_dict = {'term': def_term, 'value': definition, 'indirect': indirect, 'scope': scope, 'def_kind': def_kind}
-                    working_item['defined_terms'].append(def_dict)
-                    proc.dirty = 1
+                # Determine which client and task name to use for scope extraction
+                # Use specialized model for definitions with indirect references if configured
+                if has_indirect_scope_model and indirect and indirect.strip():
+                    # Use the indirect-specific model
+                    active_scope_client = scope_with_indirect_client
+                    active_scope_task = 'stage2.definitions.extract_scope_with_indirect'
+                else:
+                    # Use the regular scope extraction model
+                    active_scope_client = scope_client
+                    active_scope_task = 'stage2.definitions.extract_scope'
+
+                prompt = build_scope_prompt(def_term, definition, item_type_name, proc.type_list_or_string, proc.org_item_name_string)
+                scope_object = query_json(active_scope_client, [cache], prompt, proc.logfile, config=proc.config, task_name=active_scope_task)
+                scope = ''
+                if (len(scope_object) > 0 and
+                    isinstance(scope_object, list) and
+                    isinstance(scope_object[0], str) and
+                    len(scope_object[0]) > 0):
+                        scope = scope_object[0]
+                print(def_term + ': ' + definition + ': ' + scope)
+                def_kind = 'direct'
+                if isinstance(definition_object[0], dict) and 'def_kind' in definition_object[0].keys():
+                    if isinstance(definition_object[0]['def_kind'], str) and definition_object[0]['def_kind'].strip() != '':
+                        def_kind = definition_object[0]['def_kind'].strip().lower()
+                        if def_kind not in ['direct', 'elaboration']:
+                            def_kind = 'direct'
+                def_dict = {'term': def_term, 'value': definition, 'indirect': indirect, 'scope': scope, 'def_kind': def_kind}
+                working_item['defined_terms'].append(def_dict)
+                proc.dirty = 1
         
         # Item has been processed (either found definitions or marked as empty)
         items_processed_in_run += 1

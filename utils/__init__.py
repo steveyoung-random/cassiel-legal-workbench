@@ -81,6 +81,13 @@ from .definition_prompts import build_defined_terms_prompt
 from .definition_prompts import build_external_reference_validation_prompt
 from .definition_prompts import build_high_conflict_review_prompt
 from .table_handling import extract_large_tables, LARGE_TABLE_ROW_THRESHOLD
+from .definition_list_common import (
+    find_or_create_definition_list_param_key,
+    assign_definition_list_key,
+    build_definition_list_sub_unit,
+    title_contains_definition,
+)
+from .api_helpers import query_with_tools
 
 
 
@@ -166,4 +173,8 @@ __all__ = ["clean_text",
            "build_high_conflict_review_prompt",
            "build_external_reference_validation_prompt",
            "extract_large_tables",
-           "LARGE_TABLE_ROW_THRESHOLD"]
+           "LARGE_TABLE_ROW_THRESHOLD",
+           "find_or_create_definition_list_param_key",
+           "assign_definition_list_key",
+           "build_definition_list_sub_unit",
+           "title_contains_definition"]

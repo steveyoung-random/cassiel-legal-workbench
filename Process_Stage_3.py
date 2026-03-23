@@ -35,7 +35,9 @@ from bs4.element import Comment
 from collections import defaultdict
 from thefuzz import process  # For fuzzy term matching
 from utils import *
-from utils.config import get_config, get_output_directory, get_checkpoint_threshold
+from utils.config import (get_config, get_output_directory, get_checkpoint_threshold,
+                          get_cumulative_summary_list_max_chars, get_org_summary_batch_threshold,
+                          get_level2_tool_use_threshold)
 from utils.ai_client import query_text_with_retry
 from utils.processing_status import (
     init_processing_status,
@@ -245,6 +247,31 @@ def discover_files_to_process(input_path, config, filter_str=None):
     return []
 
 
+def trim_cumulative_summary_list(summary_list, max_chars, preserve_entry):
+    """
+    Trim oldest entries from cumulative_summary_list to stay under max_chars.
+
+    Removes entries from the front (oldest first) until total size <= max_chars.
+    Always skips entries equal to preserve_entry so the header is never removed.
+
+    Args:
+        summary_list: list of strings, modified in place
+        max_chars: maximum total character count
+        preserve_entry: string that must never be removed (the pre-header entry)
+    """
+    total = sum(len(s) for s in summary_list)
+    if total <= max_chars:
+        return
+    i = 0
+    while total > max_chars and i < len(summary_list):
+        if summary_list[i] == preserve_entry:
+            i += 1
+            continue
+        total -= len(summary_list[i])
+        summary_list.pop(i)
+        # don't increment i — next entry is now at the same index
+
+
 def top_organization_summaries(proc, summary_number=1):
     # Because organization_summaries is a recursive function, it needs to be called with the specific values below for the top-level.
     try:
@@ -430,33 +457,81 @@ def organization_summaries(proc, limited_content, summary_number=1):
                                     working_item[summary_text_label] = single_summary
                             else:
                                 # Multiple summaries or local items - need to combine them via AI
-                                summaries = ''
+                                # Collect individual item parts in document order
+                                item_parts = []
                                 if 2 == local_provisions:
                                     for local_list in local_prov_nums:
                                         item_name = local_list[0]
                                         item_name_plural = local_list[1]
                                         item_num = local_list[2]
-                                        summaries += item_name + ' ' + item_num + ': ' + content_pointer[item_name_plural][item_num][summary_text_label] + '\n\n'
+                                        item_parts.append(item_name + ' ' + item_num + ': ' + content_pointer[item_name_plural][item_num][summary_text_label] + '\n\n')
                                 if 2 == sub_provisions:
                                     for sub_list in sub_prov_nums:
                                         sub_level_name = sub_list[0]
                                         sub_level_name_plural = sub_list[1]
                                         sub_level_num = sub_list[2]
-                                        summaries += sub_level_name + ' ' + sub_level_num + ': ' + working_item[sub_level_name][sub_level_num][summary_text_label]+ '\n\n'
-                                if not '' == summaries:
-                                    prompt = ''
-                                    if 1 == summary_number: # A more brief summary is called for at level 1.
-                                        prompt += 'Please write a short summary of this set of one or more items. Describe them as a whole, without reference to their individual numbers. '
+                                        item_parts.append(sub_level_name + ' ' + sub_level_num + ': ' + working_item[sub_level_name][sub_level_num][summary_text_label] + '\n\n')
+                                if item_parts:
+                                    org_batch_threshold = get_org_summary_batch_threshold(config)
+                                    total_chars = sum(len(p) for p in item_parts)
+
+                                    def _make_org_prompt(is_brief):
+                                        p = ''
+                                        if is_brief:
+                                            p += 'Please write a short summary of this set of one or more items. Describe them as a whole, without reference to their individual numbers. '
+                                        else:
+                                            p += 'Please write a summary of this set of one or more items. Describe them as a whole, without reference to their individual numbers. '
+                                            p += 'While the summary should abstract away some detail, the intention is that the summary will give a reader a good understanding of what can be found in the material. '
+                                        p += 'Please provide your response without any preamble, just the actual summary.\n\n'
+                                        return p
+
+                                    if total_chars <= org_batch_threshold:
+                                        # Single call — same as before
+                                        summaries = ''.join(item_parts)
+                                        prompt = _make_org_prompt(1 == summary_number)
+                                        prompt += 'Here is the content to summarize:\n\n' + summaries
+                                        result = query_text_with_retry(client, [], prompt, logfile, max_tokens=0, max_retries=3, config=config, task_name='stage3.summary.organizational')
+                                        if not '' == clean_summary_text(result):
+                                            working_item[summary_text_label] = clean_summary_text(result)
                                     else:
-                                        prompt += 'Please write a summary of this set of one or more items. Describe them as a whole, without reference to their individual numbers. '
-                                        prompt += 'While the summary should abstract away some detail, the intention is that he summary will give a reader a good understanding of what can '
-                                        prompt += 'be found in the material. '
-                                    prompt += 'Please provide your response without any preamble, just the actual summary.\n\n'
-                                    prompt += 'Here is the content to summarize:\n\n' + summaries
-                                    # Use query_text_with_retry() to enable fallback model support
-                                    result = query_text_with_retry(client, [], prompt, logfile, max_tokens=0, max_retries=3, config=config, task_name='stage3.summary.organizational')
-                                    if not '' == clean_summary_text(result):
-                                        working_item[summary_text_label] = clean_summary_text(result)         
+                                        # Batch-and-synthesize path
+                                        batches = []
+                                        current_batch = []
+                                        current_batch_len = 0
+                                        for part in item_parts:
+                                            if current_batch and current_batch_len + len(part) > org_batch_threshold:
+                                                batches.append(current_batch)
+                                                current_batch = [part]
+                                                current_batch_len = len(part)
+                                            else:
+                                                current_batch.append(part)
+                                                current_batch_len += len(part)
+                                        if current_batch:
+                                            batches.append(current_batch)
+
+                                        # Generate interim summary per batch
+                                        interim_summaries = []
+                                        for batch_idx, batch in enumerate(batches):
+                                            batch_text = ''.join(batch)
+                                            interim_prompt = (
+                                                f'Please write a brief summary of the following items (part {batch_idx + 1} of {len(batches)}). '
+                                                f'Describe them as a whole, without reference to their individual numbers. '
+                                                f'Please provide your response without any preamble, just the actual summary.\n\n'
+                                                f'Here is the content to summarize:\n\n{batch_text}'
+                                            )
+                                            interim_result = query_text_with_retry(client, [], interim_prompt, logfile, max_tokens=0, max_retries=3, config=config, task_name='stage3.summary.organizational.batch_interim')
+                                            interim_text = clean_summary_text(interim_result)
+                                            if interim_text:
+                                                interim_summaries.append(f'Part {batch_idx + 1}: {interim_text}')
+
+                                        # Synthesize interim summaries into final summary
+                                        if interim_summaries:
+                                            synthesis_content = '\n\n'.join(interim_summaries)
+                                            synthesis_prompt = _make_org_prompt(1 == summary_number)
+                                            synthesis_prompt += 'Here is the content to summarize:\n\n' + synthesis_content
+                                            result = query_text_with_retry(client, [], synthesis_prompt, logfile, max_tokens=0, max_retries=3, config=config, task_name='stage3.summary.organizational')
+                                            if not '' == clean_summary_text(result):
+                                                working_item[summary_text_label] = clean_summary_text(result)
     else:
         InputError('organization_summaries: Document information is not correct.')
         exit(1)
@@ -1129,6 +1204,7 @@ def _summarize_leaf_level1(type_name, type_plural, cap_type_name, item_number, w
             working_item['summary_1'] = summary_text
             proc.dirty = 1
         state['cumulative_summary_list'].append('\n' + cap_type_name + ' ' + item_number + ':\n' + summary_text + '\n')
+        trim_cumulative_summary_list(state['cumulative_summary_list'], state.get('cumulative_summary_max_chars', 30000), state['cumulative_summary_list_pre'])
         return
 
     state['items_processed'][0] += 1
@@ -1162,7 +1238,10 @@ def _summarize_leaf_level1(type_name, type_plural, cap_type_name, item_number, w
     chunk_summaries = []
     all_references = []
 
+    chunk_prefix = working_item.get('chunk_prefix', '')
     for i, chunk in enumerate(chunks):
+        if chunk_prefix:
+            chunk = chunk_prefix + '\n\n' + chunk
         augmented_chunk = augment_chunk_with_metadata(chunk, metadata_suffix)
         chunk_prompt = create_chunk_summary_prompt(
             base_prompt, augmented_chunk, i + 1, total_chunks,
@@ -1263,6 +1342,7 @@ def _summarize_leaf_level1(type_name, type_plural, cap_type_name, item_number, w
         state['first_flag'][0] = False
         state['cumulative_summary_list'].append(state['cumulative_summary_list_pre'])
     state['cumulative_summary_list'].append('\n' + cap_type_name + ' ' + item_number + ':\n' + summary_for_context + '\n')
+    trim_cumulative_summary_list(state['cumulative_summary_list'], state.get('cumulative_summary_max_chars', 30000), state['cumulative_summary_list_pre'])
     proc.dirty = 1
     state['count'][0] -= 1
 
@@ -1292,6 +1372,7 @@ def _summarize_container_level1(type_name, type_plural, cap_type_name, item_numb
         state['cumulative_summary_list'].append(
             '\n' + cap_type_name + ' ' + item_number + ':\n' + working_item['summary_1'] + '\n'
         )
+        trim_cumulative_summary_list(state['cumulative_summary_list'], state.get('cumulative_summary_max_chars', 30000), state['cumulative_summary_list_pre'])
         return
 
     # Collect sub-unit summaries
@@ -1408,6 +1489,7 @@ def _summarize_container_level1(type_name, type_plural, cap_type_name, item_numb
     state['cumulative_summary_list'].append(
         '\n' + cap_type_name + ' ' + item_number + ':\n' + working_item['summary_1'] + '\n'
     )
+    trim_cumulative_summary_list(state['cumulative_summary_list'], state.get('cumulative_summary_max_chars', 30000), state['cumulative_summary_list_pre'])
     proc.dirty = 1
     state['count'][0] -= 1
 
@@ -1630,6 +1712,7 @@ def level_1_summaries(proc, count=30, checkpoint_threshold=30) -> bool:
         'items_needing_summary':       items_needing_summary,
         'count':                       [count],
         'checkpoint_threshold':        checkpoint_threshold,
+        'cumulative_summary_max_chars': get_cumulative_summary_list_max_chars(config),
     }
 
     for item_type in param_pointer.keys():
@@ -1654,6 +1737,131 @@ def level_1_summaries(proc, count=30, checkpoint_threshold=30) -> bool:
         print('More processing needed.  Please run again.\n')
         return False
     return True
+
+def _build_level2_tools():
+    """Return the tool schema list for the level-2 tool-use path."""
+    return [
+        {
+            "name": "lookup_definition",
+            "description": (
+                "Look up the definition of a term that is used in the legal document being summarized. "
+                "Call this before writing the summary if you need to understand what a key term means."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "term": {
+                        "type": "string",
+                        "description": "The term to look up (as it appears in the document)",
+                    }
+                },
+                "required": ["term"],
+            },
+        },
+        {
+            "name": "lookup_toc_section",
+            "description": (
+                "Look up a section in the document's table of contents by its identifier "
+                "(e.g., section number, article number). Use this to understand the document "
+                "structure and context around the section being summarized."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "identifier": {
+                        "type": "string",
+                        "description": "The section identifier to look up (e.g., '744.17', 'Article 5')",
+                    }
+                },
+                "required": ["identifier"],
+            },
+        },
+    ]
+
+
+def _build_level2_tool_resolver(parsed_content, working_item, item_type_name, item_number, toc_string):
+    """
+    Build a tool resolver for the level-2 tool-use path.
+
+    Returns a callable(tool_name, tool_input) -> str that resolves tool calls locally
+    using already-loaded definitions and the document table of contents.
+    """
+    definitions = collect_scoped_definitions(parsed_content, working_item)
+
+    # Group definitions by normalised term for fast lookup
+    term_to_defs = {}
+    for d in definitions:
+        raw = strip_emphasis_marks(d.get('term', '')).lower().strip()
+        if raw:
+            term_to_defs.setdefault(raw, []).append(d)
+
+    available_term_names = list(term_to_defs.keys())
+
+    def resolver(tool_name, tool_input):
+        if tool_name == 'lookup_definition':
+            term = tool_input.get('term', '').strip()
+            key = strip_emphasis_marks(term).lower()
+            matches = term_to_defs.get(key, [])
+            if not matches and available_term_names:
+                matched_name = fuzzy_match_term(term, available_term_names)
+                if matched_name:
+                    matches = term_to_defs.get(matched_name, [])
+            if not matches:
+                return f'No definition found for "{term}".'
+            lines = [f'Definition of "{term}":']
+            for d in matches:
+                value = format_definition_with_source(d, item_type_name, item_number)
+                if value:
+                    lines.append('  - ' + value)
+            return '\n'.join(lines)
+
+        if tool_name == 'lookup_toc_section':
+            identifier = tool_input.get('identifier', '').strip()
+            if not toc_string or not identifier:
+                return 'No table of contents available.'
+            toc_lines = toc_string.split('\n')
+            for i, line in enumerate(toc_lines):
+                if identifier in line:
+                    start = max(0, i - 2)
+                    end = min(len(toc_lines), i + 4)
+                    return '\n'.join(toc_lines[start:end])
+            return f'Identifier "{identifier}" not found in table of contents.'
+
+        return f'Unknown tool: {tool_name}'
+
+    return resolver
+
+
+def _create_level2_tool_use_prompt(proc, item_type_name, item_number, total_chunks) -> str:
+    """
+    Variant of create_level_2_base_prompt for the tool-use path.
+    Replaces the 'Context is provided above' line with tool instructions.
+    """
+    max_paragraphs = 5 + max(0, total_chunks - 1)
+    doc_title = ''
+    if ('document_information' in proc.parsed_content
+            and 'title' in proc.parsed_content['document_information']):
+        doc_title = proc.parsed_content['document_information']['title']
+
+    prompt = ''
+    if doc_title:
+        prompt += 'I will be asking you about this regulation: ' + doc_title + '\n\n'
+    prompt += 'Here is my request.  Please provide a summary of the following portion of the regulation.  '
+    prompt += 'The summary should allow a legal practitioner to understand the rights, restrictions, and obligations '
+    prompt += f'set forth in this portion.  Please do not exceed {max_paragraphs} paragraphs for the summary '
+    prompt += '(shorter is fine).  '
+    prompt += f'The summary should not re-iterate which {item_type_name} is being summarized, '
+    prompt += 'that will be attached to the summary separately.  '
+    prompt += '**IMPORTANT: The summary must not be longer than the text being summarized.**  '
+    prompt += 'What you return will be incorporated into a compilation of summaries of the regulation, '
+    prompt += 'so it is important that you return nothing beyond the summary itself (no preamble, no commentary about how the '
+    prompt += 'task was completed).\n\n'
+    prompt += ('You have access to two tools: lookup_definition (to look up the meaning of key terms) '
+                'and lookup_toc_section (to look up sections in the table of contents). '
+                'Use these tools as needed to understand the text before writing the summary.  '
+                'Do NOT summarize the tool results themselves — only summarize the provided text.\n\n')
+    return prompt
+
 
 def _summarize_leaf_level2(type_name, type_plural, cap_type_name, item_number, working_item, state):
     """
@@ -1715,11 +1923,31 @@ def _summarize_leaf_level2(type_name, type_plural, cap_type_name, item_number, w
         raise InputError(f'level_2_summaries: chunking failed for {type_name} {item_number}: {e}')
         exit(1)
 
-    base_prompt = create_level_2_base_prompt(proc, type_name, item_number, total_chunks)
-    cache_prompt_list = prepare_context_for_caching(context_string, table_of_contents_cache)
+    # Decide whether to use the tool-use path (oversized context) or normal path
+    tool_use_threshold = get_level2_tool_use_threshold(config)
+    context_total_chars = len(context_string) + len(table_of_contents_cache)
+    use_tool_path = context_total_chars > tool_use_threshold
+
+    if use_tool_path:
+        print(f'    [Tool-use path] Context {context_total_chars} chars exceeds threshold {tool_use_threshold}')
+        base_prompt = _create_level2_tool_use_prompt(proc, type_name, item_number, total_chunks)
+        cache_prompt_list = []
+        level2_tools = _build_level2_tools()
+        tool_resolver = _build_level2_tool_resolver(
+            parsed_content, working_item, type_name, item_number, table_of_contents_cache
+        )
+    else:
+        base_prompt = create_level_2_base_prompt(proc, type_name, item_number, total_chunks)
+        cache_prompt_list = prepare_context_for_caching(context_string, table_of_contents_cache)
+        level2_tools = None
+        tool_resolver = None
+
     chunk_summaries = []
 
+    chunk_prefix = working_item.get('chunk_prefix', '')
     for i, chunk in enumerate(chunks):
+        if chunk_prefix:
+            chunk = chunk_prefix + '\n\n' + chunk
         augmented_chunk = augment_chunk_with_metadata(chunk, metadata_suffix)
         chunk_prompt = create_chunk_summary_prompt(
             base_prompt, augmented_chunk, i + 1, total_chunks,
@@ -1728,9 +1956,17 @@ def _summarize_leaf_level2(type_name, type_plural, cap_type_name, item_number, w
         )
         print(f'    Chunk {i+1}/{total_chunks} of {cap_type_name} {item_number}...')
         try:
-            result = query_text_with_retry(client, cache_prompt_list, chunk_prompt, logfile,
-                                           max_tokens=0, max_retries=3, config=config,
-                                           task_name='stage3.summary.level2')
+            if use_tool_path:
+                from utils.api_helpers import query_with_tools
+                result = query_with_tools(
+                    client, cache_prompt_list, chunk_prompt,
+                    level2_tools, tool_resolver, logfile,
+                    max_tokens=0, config=config, task_name='stage3.summary.level2'
+                )
+            else:
+                result = query_text_with_retry(client, cache_prompt_list, chunk_prompt, logfile,
+                                               max_tokens=0, max_retries=3, config=config,
+                                               task_name='stage3.summary.level2')
         except ModelError as e:
             raise ModelError(f'level_2_summaries: Failed to get response for {type_name} {item_number}, chunk {i+1} after retries: {e}')
             exit(1)
@@ -1739,11 +1975,12 @@ def _summarize_leaf_level2(type_name, type_plural, cap_type_name, item_number, w
             exit(1)
         summary_text = clean_summary_text(result)
         if not summary_text:
-            from utils.api_cache import remove_cached_response
-            full_cache = ''.join(cache_prompt_list)
-            model_name = getattr(client, 'model', 'unknown')
-            remove_cached_response(full_cache, chunk_prompt, model_name, 0)
-            print(f'    [Cache cleanup] Removed empty summary cache entry for {type_name} {item_number}, chunk {i+1}')
+            if not use_tool_path:
+                from utils.api_cache import remove_cached_response
+                full_cache = ''.join(cache_prompt_list)
+                model_name = getattr(client, 'model', 'unknown')
+                remove_cached_response(full_cache, chunk_prompt, model_name, 0)
+                print(f'    [Cache cleanup] Removed empty summary cache entry for {type_name} {item_number}, chunk {i+1}')
             raise ModelError(f'level_2_summaries: Empty summary response for {type_name} {item_number}, chunk {i+1}')
             exit(1)
         chunk_summaries.append(summary_text)
@@ -1895,8 +2132,22 @@ def _summarize_container_level2(type_name, type_plural, cap_type_name, item_numb
                     issue_description=f"Multiple direct definitions in scope for term '{c.get('term','')}'",
                     details=c
                 )
-        cache_prompt_list = prepare_context_for_caching(context_string, table_of_contents_cache)
-        base_prompt = create_level_2_base_prompt(proc, type_name, item_number, 1)
+        tool_use_threshold = get_level2_tool_use_threshold(config)
+        context_total_chars = len(context_string) + len(table_of_contents_cache)
+        use_tool_path = context_total_chars > tool_use_threshold
+        if use_tool_path:
+            print(f'    [Tool-use path] Context {context_total_chars} chars exceeds threshold {tool_use_threshold}')
+            cache_prompt_list = []
+            base_prompt = _create_level2_tool_use_prompt(proc, type_name, item_number, 1)
+            level2_tools = _build_level2_tools()
+            tool_resolver = _build_level2_tool_resolver(
+                parsed_content, working_item, type_name, item_number, table_of_contents_cache
+            )
+        else:
+            cache_prompt_list = prepare_context_for_caching(context_string, table_of_contents_cache)
+            base_prompt = create_level_2_base_prompt(proc, type_name, item_number, 1)
+            level2_tools = None
+            tool_resolver = None
         sub_block = '\n[Subsidiary unit summaries:]\n' + '\n'.join(sub_summaries)
         combined_text = container_text + '\n' + sub_block
         chunk_prompt = create_chunk_summary_prompt(
@@ -1904,9 +2155,17 @@ def _summarize_container_level2(type_name, type_plural, cap_type_name, item_numb
             unit_title=working_item.get('unit_title', '')
         )
         try:
-            result = query_text_with_retry(client, cache_prompt_list, chunk_prompt, logfile,
-                                           max_tokens=0, max_retries=3, config=config,
-                                           task_name='stage3.summary.level2')
+            if use_tool_path:
+                from utils.api_helpers import query_with_tools
+                result = query_with_tools(
+                    client, cache_prompt_list, chunk_prompt,
+                    level2_tools, tool_resolver, logfile,
+                    max_tokens=0, config=config, task_name='stage3.summary.level2'
+                )
+            else:
+                result = query_text_with_retry(client, cache_prompt_list, chunk_prompt, logfile,
+                                               max_tokens=0, max_retries=3, config=config,
+                                               task_name='stage3.summary.level2')
         except Exception as e:
             raise ModelError(f'Container level_2 summary failed for {cap_type_name} {item_number}: {e}')
         final_summary = clean_summary_text(result)

@@ -36,6 +36,7 @@ A `table` sub-unit has the following structure:
   "table_column_headers": ["Country", "Entity", "License requirement"],
   "table_caption": "",
   "unit_title": "Table 1",
+  "placeholder": "[Table 1 extracted as sub-unit table 4]",
   "context": [{"part": "744"}, {"supplement": "No. 4 to Part 744"}],
   "breakpoints": []
 }
@@ -47,6 +48,7 @@ Field notes:
 - `table_column_headers`: for HTML TABLE elements, extracted from `<TH>` in `<THEAD>`; for GPOTABLE elements, from `<CHED>` in `<BOXHD>`. Empty list if none found.
 - `table_caption`: for HTML TABLE, from `<CAPTION>`; for GPOTABLE, from `<TTITLE>`. Empty string if absent.
 - `table_html`: for HTML TABLE elements, contains serialized HTML. For CFR GPOTABLE elements (e.g., the Entity List), contains raw GPOTABLE XML. Stage 3 AI handles both formats.
+- `placeholder`: exact string placed in the parent unit's `text` in place of this sub-unit's content. Enables deterministic reconstruction of the original text.
 
 Parameter entry (key assigned dynamically — the next available integer key in `document_information.parameters`):
 ```json
@@ -183,66 +185,42 @@ The type is normally named `"table"` to match the natural language used in docum
 - **No row-level Q&A**: The table content is stored in `table_html` but is not indexed. Retrieving specific rows requires a separate lookup mechanism not yet implemented.
 - **Approximate row count**: `table_row_count` counts all row elements including header and footer rows, so the count may slightly exceed the number of data rows.
 - **`parse_appendix` only**: XML-level interception is implemented in `parse_appendix()` (direct appendix children and tables inside nested DIVs via `extract_nested_div_content()`). Large tables in regular CFR sections (`parse_section()`) are not yet extracted as sub-units.
-- **Tables inside method-segmented appendices not yet extracted**: When an appendix is subdivided into `method_section` sub-units (see Section 11 below), large GPOTABLE/TABLE elements inside those segments are currently inlined as text rather than extracted as `table` sub-units. Task 9.11 tracks this.
-
 ---
 
-## 11. Planned: Table Sub-Units Nested Inside Method Sections (Task 9.11)
+## 11. Table Sub-Units Nested Inside Method Sections (Task 9.11)
 
-Some large CFR appendices (e.g., 40 CFR Appendix B to Part 60) qualify for both Method NNN subdivision (≥2 HD1 headings matching "Method|Performance Specification|Procedure \d+") **and** contain large tables inside those method segments. Currently `_accumulate_method_segments()` inlines all tables as text, and no `table` sub-units are created.
+Some large CFR appendices (e.g., 40 CFR Appendix B to Part 60) qualify for both Method NNN subdivision (≥2 HD1 headings matching "Method|Performance Specification|Procedure \d+") **and** contain large tables inside those method segments. This section describes the implementation.
 
-### Design Decision: Option B — Nested Sub-Units
+**Testing status**: Implemented; unit tests for the new behaviour are not yet written. Re-parsing Part 60 and running `detect_long_units.py` is the recommended first verification step.
 
-Table sub-units should be registered as sub-units of their enclosing `method_section` sub-unit (not as siblings of it under the appendix). This preserves logical containment: a table that documents emission factors for "Performance Specification 2" is a child of that method section, not a sibling.
+### Design: Option B — Nested Sub-Units
 
-This nesting is fully supported by the existing infrastructure:
-- `_iter_all_nodes()` (in `utils/document_handling.py`) recursively traverses all sub-units with `operational: 1`, regardless of depth. Both `method_section` and `table` have `operational: 1, is_sub_unit: True`, so the traversal will naturally descend appendix → method_section → table.
-- Stage 2, 3, and 4 all detect data-table sub-units by the `data_table: 1` flag, which is agnostic to type name and nesting depth.
-- In Stage 3, `has_sub_units(method_section)` returns True when a method section has table sub-units, causing it to take the container summary path — which collects each table's `summary_1` and synthesizes a container summary for the method section. This is the correct behavior.
+Table sub-units are registered as sub-units of their enclosing `method_section` sub-unit, not as siblings under the appendix. A table that belongs to "Performance Specification 11" is a child of that method section.
 
-### Implementation Plan
+This nesting is fully supported by the existing infrastructure without any Stage 2/3/4 changes:
+- `_iter_all_nodes()` (in `utils/document_handling.py`) recursively traverses all sub-units with `operational: 1`, regardless of depth. Both `method_section` and `table` have `operational: 1, is_sub_unit: True`.
+- Stage 2, 3, and 4 all detect data-table sub-units by the `data_table: 1` flag, agnostic to nesting depth.
+- In Stage 3, `has_sub_units(method_section)` returns True when a method section has table sub-units, triggering the container summary path (collects each table's `summary_1`, synthesises a method-section summary).
 
-Two functions need changes; no downstream (Stage 2/3/4) changes are required.
+### Changes in `cfr_set_parse.py`
 
-#### 1. `_accumulate_method_segments()` in `cfr_set_parse.py`
+**`_accumulate_method_segments()`**: Now returns a 4-tuple `(preamble_parts, preamble_pending_tables, segments, annotation_parts)`. Each segment dict has a `pending_tables` list alongside `text_parts`, `has_content`, and `title`. When a `GPOTABLE`/`TABLE` child with ≥ `LARGE_TABLE_ROW_THRESHOLD` rows is encountered, it is appended to the current segment's (or preamble's) `pending_tables` and a placeholder `[Table N pending sub-unit extraction]` is added to `text_parts`. Small tables still inline as before. The `DIV` branch passes the current pending-tables list to `extract_nested_div_content()` so tables inside nested DIVs are also intercepted.
 
-Add a `pending_tables` list to each segment dict. In the `GPOTABLE`/`TABLE` branch, check the row count:
-- If ≥ `LARGE_TABLE_ROW_THRESHOLD`: append the XML element to `seg['pending_tables']`; add placeholder `[Table N pending sub-unit extraction]` to `_parts()` (where N = `len(seg['pending_tables'])`); call `_mark_content()`.
-- If < threshold: call `extract_table_text()` and inline as before.
+**Method subdivision block in `parse_appendix()`**:
+- Gate 2 (`all(s['has_content'] for s in _seg_list)`) has been **removed**. Gate 1 (requiring ≥2 matching HD1 headings) is sufficient to prevent false positives. Empty segments (e.g., "[Reserved]" entries) are handled in the build phase.
+- If any segment or the preamble has `pending_tables`, `find_or_create_table_param_key()` is called once for the whole appendix.
+- Before calling `assemble_text_and_breakpoints()` on each segment, table keys are pre-assigned and placeholders in `text_parts` are replaced with final key-based markers (e.g., `[Table 1 extracted as sub-unit large_table 1_PS11]`). This ensures breakpoint offsets reflect the final text length.
+- Each segment's table sub-units are registered in `seg_entry["sub_units"]` and in `document_information["sub_unit_index"]` with `path: [ms_key_str, seg_key]` so fast-path `lookup_item()` navigation works correctly.
+- Preamble tables (rare: a large table before the first method heading) become direct sub-units of the appendix with `path: []`.
+- **Sentinel for empty segments**: Any segment with no `text_parts` and no table sub-units (after table extraction) receives `text = "[No further unit content.]"` so Stage 3 produces a summary from `unit_title` alone. This handles "[Reserved]" entries and any other legitimately empty sections without fragile title-string matching.
 
-Also add `pending_tables` to the preamble (rare but possible: large table before the first method heading). The function signature and return value do not change — `pending_tables` is embedded in each segment dict.
+### `sub_unit_index` path format for nested tables
 
-Also pass `pending_large_tables` through to `extract_nested_div_content()` calls for the current segment (line 1543), so large tables inside nested DIVs within a method segment are also intercepted.
-
-#### 2. Method subdivision block in `parse_appendix()` (around line 1640)
-
-After both gates pass and before building each method sub-unit:
-
-**a. Key pre-assignment** (must happen before `assemble_text_and_breakpoints` to avoid invalidating offsets):
-
-For each segment that has non-empty `pending_tables`, call `find_or_create_table_param_key()` once (same call for the entire appendix; idempotent). Then for each table in `seg['pending_tables']`:
-- Call `assign_table_key(local_num, seg_key, taken)` to get the final sub-unit key.
-- Replace `[Table {local_num} pending sub-unit extraction]` in `seg['text_parts']` with the final marker `[Table {local_num} extracted as sub-unit table {final_key}]`.
-- Record `(xml_element, final_key)` for later sub-unit building.
-
-Then call `assemble_text_and_breakpoints(seg['text_parts'])` on the now-finalized text.
-
-**b. Build table sub-units for the segment**:
-
-For each `(xml_element, key)` pair:
-- Call `_build_xml_table_sub_unit(xml_element, local_num, method_section_context, method_section_type_name, seg_key)` to build the sub-unit dict.
-- Register in `table_sub_units[key]`.
-
-Add `"sub_units": {table_key_str: table_sub_units}` to the method section's dict (only when non-empty).
-
-Register table sub-units in `document_information["sub_unit_index"][table_key_str]` (same global index used by all table sub-units).
-
-**Context for `_build_xml_table_sub_unit`**: The method section sub-unit's context should be passed as the parent context. This is built from `item_entry["context"]` (appendix context) extended with `{"method_section": seg_key}`.
-
-#### Key constraint: one `find_or_create_table_param_key()` call per appendix
-
-The table parameter type is shared document-wide. Call `find_or_create_table_param_key()` at most once for the entire method subdivision block (before the per-segment loop), only if any segment has pending tables. The result is reused for all segments.
-
-#### Interaction with the existing flat-path guard
-
-The existing guard `if pending_large_tables and not item_entry.get("sub_units"):` in `parse_appendix()` runs after the method subdivision block. When method subdivision runs, `item_entry` is set inside the `_method_subdivision_applied` branch and `sub_units` is set on it, so the guard would fire even if `pending_large_tables` were populated — but with the new design, flat-path `pending_large_tables` will be empty (the flat text assembly loop does not run when method subdivision applies), so the guard condition is vacuously false in any case. No change to the guard is needed.
+```json
+{
+  "container_plural": "appendices",
+  "container_id": "B to Part 60",
+  "path": ["<ms_key_str>", "<seg_key>"]
+}
+```
+The fast-path lookup navigates: appendix → `sub_units[ms_key_str][seg_key]` → `sub_units[table_key_str][table_key]`.
