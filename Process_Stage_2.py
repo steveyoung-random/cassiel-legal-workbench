@@ -201,7 +201,7 @@ def process_file_stage_2(parse_file_path, output_file_path, client, logfile, che
     # (they call exit(0) when they hit their item count limit).
     stage_2_functions_done = True
     try:
-        find_defined_terms(proc, min(1000, max_items))
+        find_defined_terms(proc, max_items)
         process_indirect_definitions(proc)
         find_defined_terms_scopes(proc, max_items)
         enhance_resolve_indirect_definitions(proc, max_items)
@@ -261,8 +261,8 @@ def main():
     parser.add_argument(
         '--max-items',
         type=int,
-        default=10000,
-        help='Maximum number of items to process in this run before pausing (default: 10000)'
+        default=None,
+        help='Maximum number of items to process in this run before pausing (default: from config or 10000)'
     )
 
     args = parser.parse_args()
@@ -276,8 +276,11 @@ def main():
     else:
         checkpoint_threshold = get_checkpoint_threshold(config)
     
-    # Get max items
-    max_items = args.max_items
+    # Get max items: explicit CLI wins, else config.processing.stage_2_max_items, else 10000
+    if args.max_items is not None:
+        max_items = args.max_items
+    else:
+        max_items = config.get('processing', {}).get('stage_2_max_items', 10000)
 
     # Discover files to process
     files_to_process = discover_files_to_process(args.input_path, config, args.filter)
@@ -289,6 +292,7 @@ def main():
         sys.exit(1)
 
     print(f'Found {len(files_to_process)} file(s) to process')
+    print(f'max_items: {max_items}')
 
     # Create AI client and logfile
     # Determine directory for logfile

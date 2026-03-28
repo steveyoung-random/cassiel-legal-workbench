@@ -87,8 +87,8 @@ class SummaryProcessor:
         # Helpers:
         self.org_item_name_set = get_organizational_item_name_set(parsed_content)
         self.org_item_name_string = get_list_string(sorted(self.org_item_name_set), 'or') # String of org_item_name names separated by commas, ending with 'or' if multiple.
-        self.type_name_list = sorted(get_full_item_name_set(parsed_content)) # Note that this gathers all item_name names, not just operational ones.
-        self.type_list_or_string = get_list_string(self.type_name_list, 'or') # String of all item_name names separated by commas, ending with 'or' if multiple.
+        self.type_name_list = sorted(get_operational_item_name_set(parsed_content))  # Excludes is_sub_unit types so reference examples match TOC-addressable units.
+        self.type_list_or_string = get_list_string(self.type_name_list, 'or')  # String of operational item names separated by commas, ending with 'or' if multiple.
 
     def flush(self):
         """

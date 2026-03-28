@@ -184,7 +184,7 @@ def _submit_question_job(processed_file: str, question_text: str, config: Dict):
 
         params = {
             'question_text': question_text,
-            'max_items': st.session_state.get('max_items', 300),
+            'max_items': st.session_state.get('max_items', 10000),
             'max_tokens': 1000,
             'max_iterations': 3,
             'qa_mode': st.session_state.get('qa_mode', 'standard'),

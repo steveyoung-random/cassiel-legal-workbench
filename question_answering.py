@@ -1407,7 +1407,8 @@ class ChunkAnalyzer:
             # For now, rely on API-level caching; we do our own high-level
             # grouping in QueryWithBaseClient.
             try:
-                result_obj = query_json(self.client, cache_prompt_list, query_prompt, self.logfile)
+                result_obj = query_json(self.client, cache_prompt_list, query_prompt, self.logfile,
+                                        max_tokens=16000)
             except ModelError as e:
                 raise ModelError(
                     f"ChunkAnalyzer: invalid JSON response for {item_type_name} "
@@ -1525,12 +1526,16 @@ class ItemAnalyzer:
 # ---------------------------------------------------------------------------
 
 
-def _iter_leaf_scores(param_pointer, item_data):
+def _iter_text_bearing_sub_units(param_pointer, item_data):
     """
-    Recursively yield leaf (non-container) items from a container for scoring.
+    Recursively yield all sub-units that have non-empty text at any nesting depth.
 
-    Yields (type_key_str, type_name, sub_num, sub_data) for each leaf item
-    at any nesting depth beneath item_data.
+    Yields (type_key_str, type_name, sub_num, sub_data) for each text-bearing sub-unit.
+    Unlike the old _iter_leaf_scores, this also yields non-leaf sub-units that have
+    text (e.g., a method_section that contains nested table sub-units).  Data-table
+    and other text-less sub-units are skipped — they are not scored or analyzed as
+    prose; their summary_1 is available to parent/sibling analysts via placeholders
+    in the parent's text field.
     """
     for sub_type_key, sub_type_items in item_data.get("sub_units", {}).items():
         sub_p = _resolve_param_key(param_pointer, sub_type_key)
@@ -1539,10 +1544,10 @@ def _iter_leaf_scores(param_pointer, item_data):
         sub_type_key_str = str(sub_type_key)
         sub_type_name = sub_p.get("name", "")
         for sub_num, sub_data in sub_type_items.items():
-            if has_sub_units(sub_data):
-                yield from _iter_leaf_scores(param_pointer, sub_data)
-            else:
+            if sub_data.get("text"):
                 yield (sub_type_key_str, sub_type_name, sub_num, sub_data)
+            if has_sub_units(sub_data):
+                yield from _iter_text_bearing_sub_units(param_pointer, sub_data)
 
 
 # ---------------------------------------------------------------------------
@@ -2225,6 +2230,69 @@ class QuestionProcessor:
 
         return results
 
+    def _apply_group_promotion(self, scores: dict) -> bool:
+        """
+        Promote all text-bearing members of a substantive unit family to the group max score.
+
+        A "family" is a top-level substantive unit together with all of its text-bearing
+        sub-units at any nesting depth.  If any member scores above 0, every other member
+        of the same family is elevated to that same max score.  This ensures that when any
+        part of a logically unified unit is relevant, analysts receive all of its prose
+        components — not just the piece whose summary happened to score highest.
+
+        Data-table and other text-less sub-units are not part of any family (they are
+        never handed to prose analysts regardless of score).
+
+        Returns True if any scores were changed.
+        """
+        param_pointer = self.parsed_content["document_information"]["parameters"]
+        content_pointer = self.parsed_content["content"]
+        changed = False
+
+        for item_type in param_pointer:
+            p = param_pointer[item_type]
+            if not (p.get("operational") == 1 and "name" in p and "name_plural" in p):
+                continue
+            if p.get("is_sub_unit", False):
+                continue
+            item_type_names = p["name_plural"]
+            if item_type_names not in content_pointer:
+                continue
+
+            for item_num, item_data in content_pointer[item_type_names].items():
+                if not has_sub_units(item_data):
+                    continue
+
+                # Collect all text-bearing members of this family.
+                members: List[Tuple[str, str]] = []  # (type_key, num)
+
+                if item_data.get("text"):
+                    members.append((item_type, item_num))
+
+                for sub_type_key_str, _, sub_num, _ in _iter_text_bearing_sub_units(param_pointer, item_data):
+                    members.append((sub_type_key_str, sub_num))
+
+                if len(members) <= 1:
+                    continue  # nothing to promote
+
+                # Find the highest score any family member has received.
+                max_score = max(
+                    scores.get(type_key, {}).get(num, 0)
+                    for type_key, num in members
+                )
+
+                if max_score == 0:
+                    continue  # no member is relevant — nothing to promote
+
+                # Elevate every under-scored (or unscored) member to max_score.
+                for type_key, num in members:
+                    current = scores.get(type_key, {}).get(num, 0)
+                    if current < max_score:
+                        scores.setdefault(type_key, {})[num] = max_score
+                        changed = True
+
+        return changed
+
     def score_relevance(self, max_tokens: int = 1000) -> None:
         """
         Score each operational item for relevance to the question.
@@ -2291,9 +2359,12 @@ class QuestionProcessor:
                 scores[item_type] = {}
 
             for item_num, item_data in content_pointer[item_type_names].items():
-                # Container expansion: recursively collect leaf sub-units
+                # Container expansion: collect all text-bearing sub-units for scoring,
+                # then also score the parent itself if it has text.  Data-table and
+                # other text-less sub-units are intentionally excluded — they are never
+                # handed to analysts as prose and scoring them accomplishes nothing.
                 if has_sub_units(item_data):
-                    for sub_type_key_str, sub_type_name, sub_num, sub_data in _iter_leaf_scores(param_pointer, item_data):
+                    for sub_type_key_str, sub_type_name, sub_num, sub_data in _iter_text_bearing_sub_units(param_pointer, item_data):
                         if sub_type_key_str not in scores:
                             scores[sub_type_key_str] = {}
                         if sub_num in scores[sub_type_key_str]:
@@ -2327,7 +2398,33 @@ class QuestionProcessor:
 
                         to_score.append((sub_type_key_str, sub_type_name, sub_num, summary))
 
-                    continue  # skip the parent container itself
+                    # Also score the parent unit itself when it carries prose text.
+                    # (Previously the parent was unconditionally skipped.)
+                    if item_data.get("text") and item_num not in scores[item_type]:
+                        should_score = True
+                        if org_summary_scoring and org_scores:
+                            context = item_data.get("context", [])
+                            if context:
+                                full_path = []
+                                for context_item in context:
+                                    for ctx_type, ctx_id in context_item.items():
+                                        if ctx_type in org_name_set:
+                                            full_path.append(f"{ctx_type}_{ctx_id}")
+                                if full_path:
+                                    parent_org_key = "/".join(full_path)
+                                    should_score = org_scores.get(parent_org_key, 0) > 0
+                        if should_score:
+                            summary = ""
+                            if scoring_summary_level == "summary_2" and item_data.get("summary_2"):
+                                summary = item_data["summary_2"]
+                            elif item_data.get("summary_1"):
+                                summary = item_data["summary_1"]
+                            elif item_data.get("summary_2"):
+                                summary = item_data["summary_2"]
+                            if summary:
+                                to_score.append((item_type, item_type_name, item_num, summary))
+
+                    continue  # done with container; non-container path below handles simple items
 
                 if item_num in scores[item_type]:
                     continue  # already scored
@@ -2461,8 +2558,13 @@ class QuestionProcessor:
                 if to_rescore:
                     updated = True
 
+        # Step 4: Group promotion — if any text-bearing member of a substantive unit
+        # family scored above 0, elevate all other text-bearing members to the same score.
+        if self._apply_group_promotion(scores):
+            updated = True
+
         self.question_object["scores"] = scores
-        
+
         # Mark scoring as complete (idempotency)
         progress = self.question_object.get("progress", {})
         progress["scoring_complete"] = True
@@ -2652,6 +2754,11 @@ class QuestionProcessor:
             for req_id in requests_to_remove:
                 if req_id in requests:
                     del requests[req_id]
+
+        if new_sections_added > 0:
+            # Apply group promotion so that requesting one member of a substantive unit
+            # family automatically includes all other text-bearing members at the same score.
+            self._apply_group_promotion(scores)
 
         if new_sections_added > 0 or requests_to_remove:
             self.question_object["scores"] = scores
@@ -3176,7 +3283,7 @@ class QuestionProcessor:
 
         try:
             client = self._get_client_for_phase('cleanup')
-            max_tokens = count_before * 150 + 500
+            max_tokens = min(count_before * 300 + 500, 16000)
             result = query_json(
                 client, [], prompt, self.logfile,
                 max_tokens=max_tokens, config=self._config,
@@ -3409,9 +3516,10 @@ class QuestionProcessor:
                 scores[item_type] = {}
 
             for item_num, item_data in content_pointer[item_type_names].items():
-                # Container expansion: recursively add leaf sub-units to scores
+                # Container expansion: add all text-bearing sub-units and, when the
+                # parent itself has prose text, the parent too.
                 if has_sub_units(item_data):
-                    for sub_type_key_str, _, sub_num, sub_data in _iter_leaf_scores(param_pointer, item_data):
+                    for sub_type_key_str, _, sub_num, sub_data in _iter_text_bearing_sub_units(param_pointer, item_data):
                         if sub_type_key_str not in scores:
                             scores[sub_type_key_str] = {}
                         if sub_num in scores[sub_type_key_str] and scores[sub_type_key_str][sub_num] != 0:
@@ -3420,7 +3528,15 @@ class QuestionProcessor:
                             continue
                         scores[sub_type_key_str][sub_num] = 1
                         zero_score_count += 1
-                    continue  # skip the parent container
+
+                    # Also add the parent when it has prose text of its own.
+                    if item_data.get("text"):
+                        if item_num not in scores[item_type] or scores[item_type][item_num] == 0:
+                            if "summary_1" in item_data or "summary_2" in item_data:
+                                scores[item_type][item_num] = 1
+                                zero_score_count += 1
+
+                    continue  # done with container
 
                 # Only process sections that scored 0
                 if item_num in scores[item_type] and scores[item_type][item_num] != 0:

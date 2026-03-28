@@ -928,7 +928,7 @@ def process_stage_2_job(queue, job):
         queue.log_message(job_id, 'INFO', 'Phase 1: Extracting definitions')
         process_stage_2_phase_with_progress(
             proc, find_defined_terms, 'extracting_definitions', 1, 6,
-            proc, min(1000, max_items)
+            proc, max_items
         )
 
         # Phase 2: Process indirect definitions

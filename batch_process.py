@@ -164,6 +164,8 @@ def process_single_file(
     stages: List[int],
     config: dict,
     checkpoint_threshold: int,
+    max_items_stage_2: int,
+    max_items_stage_3: int,
     force: bool,
     results: BatchResults
 ) -> None:
@@ -204,7 +206,7 @@ def process_single_file(
                     client,
                     logfile,
                     checkpoint_threshold,
-                    max_items=10000,
+                    max_items=max_items_stage_2,
                     config=config
                 )
 
@@ -261,7 +263,7 @@ def process_single_file(
                     client,
                     logfile,
                     checkpoint_threshold,
-                    max_items=300,
+                    max_items=max_items_stage_3,
                     clients=clients,
                     config=config
                 )
@@ -349,6 +351,12 @@ Examples:
         help='Stop processing on first error instead of continuing'
     )
 
+    parser.add_argument(
+        '--max-items',
+        type=int,
+        help='Maximum items per stage per run (Stage 2 default: 10000, Stage 3 default: 300)'
+    )
+
     args = parser.parse_args()
 
     # Validate directory
@@ -379,6 +387,10 @@ Examples:
         checkpoint_threshold = args.checkpoint_threshold
     else:
         checkpoint_threshold = get_checkpoint_threshold(config)
+
+    # Determine max_items per stage (None = use stage default)
+    max_items_stage_2 = args.max_items if args.max_items is not None else 10000
+    max_items_stage_3 = args.max_items if args.max_items is not None else 300
 
     # Discover files
     print(f"Scanning directory: {args.directory}")
@@ -412,6 +424,8 @@ Examples:
                 stages,
                 config,
                 checkpoint_threshold,
+                max_items_stage_2,
+                max_items_stage_3,
                 args.force,
                 results
             )

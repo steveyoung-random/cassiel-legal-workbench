@@ -98,7 +98,7 @@ def render_ask_question_tab(file_path: str, doc_title: str):
                 "Max Items",
                 min_value=50,
                 max_value=500,
-                value=st.session_state.get('max_items', 300),
+                value=st.session_state.get('max_items', 10000),
                 help="Maximum number of items to process"
             )
 

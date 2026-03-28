@@ -170,12 +170,12 @@ def render_processing_parameters(config: Dict):
     )
     st.session_state.checkpoint_threshold = checkpoint_threshold
 
-    # Max items
+    # Max items (10000 matches Process_Stage_2.py default)
     max_items = st.number_input(
         "Max Items",
         min_value=1,
         max_value=100000,
-        value=st.session_state.get('max_items', 300),
+        value=st.session_state.get('max_items', 10000),
         help="Maximum number of items to process in this run"
     )
     st.session_state.max_items = max_items
@@ -323,7 +323,7 @@ def _handle_stage_2_submission(config: Dict):
 
             params = {
                 'checkpoint_threshold': st.session_state.get('checkpoint_threshold', 30),
-                'max_items': st.session_state.get('max_items', 300),
+                'max_items': st.session_state.get('max_items', 10000),
                 'config': 'config.json'
             }
 
@@ -373,7 +373,7 @@ def _handle_stage_3_submission(config: Dict):
 
             params = {
                 'checkpoint_threshold': st.session_state.get('checkpoint_threshold', 30),
-                'max_items': st.session_state.get('max_items', 300),
+                'max_items': st.session_state.get('max_items', 10000),
                 'config': 'config.json'
             }
 
@@ -472,7 +472,7 @@ def _handle_question_submission(config: Dict):
 
             params = {
                 'question_text': question_text,
-                'max_items': st.session_state.get('max_items', 300),
+                'max_items': st.session_state.get('max_items', 10000),
                 'max_tokens': 1000,
                 'max_iterations': 3,
                 'qa_mode': st.session_state.get('qa_mode', 'standard'),

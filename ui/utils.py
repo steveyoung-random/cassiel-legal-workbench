@@ -153,8 +153,8 @@ def init_session_state(st) -> None:
         'monitoring_job_id': None,
         'processing_active': False,
 
-        # Config
-        'max_items': 300,
+        # Config (10000 matches Process_Stage_2.py default; Stage 3 users can lower if needed)
+        'max_items': 10000,
         'checkpoint_threshold': 30,
 
         # Pagination
