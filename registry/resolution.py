@@ -374,14 +374,14 @@ def retry_not_in_corpus(
     (no_citation) remain unchanged; those require the AI pass.
 
     Returns:
-        Stats dict: {resolved, ambiguous, not_in_corpus, no_citation, skipped}.
+        Stats dict: {resolved, ambiguous, not_in_corpus, no_citation}.
     """
     refs = registry.get_references(resolution_status='not_in_corpus')
     if not refs:
-        return dict(resolved=0, ambiguous=0, not_in_corpus=0, no_citation=0, skipped=0)
+        return dict(resolved=0, ambiguous=0, not_in_corpus=0, no_citation=0)
 
     corpus_docs = _deduplicate_by_stage(registry.get_all_documents())
-    stats = dict(resolved=0, ambiguous=0, not_in_corpus=0, no_citation=0, skipped=0)
+    stats = dict(resolved=0, ambiguous=0, not_in_corpus=0, no_citation=0)
 
     for ref in refs:
         ref_text = ref['ref_text']
@@ -463,6 +463,9 @@ def resolve_unresolved(
 
     Returns:
         Stats dict: {resolved, ambiguous, not_in_corpus, no_citation, skipped}.
+        'skipped' is always 0 — pre-filtering by status_filter means already-resolved
+        refs never enter the loop; force=True processes all refs with no guard needed.
+        The key is retained for backward compatibility with callers.
     """
     status_filter = None if force else 'unresolved'
     refs = registry.get_references(resolution_status=status_filter)
@@ -482,10 +485,6 @@ def resolve_unresolved(
     stats = dict(resolved=0, ambiguous=0, not_in_corpus=0, no_citation=0, skipped=0)
 
     for ref in refs:
-        if not force and ref['resolution_status'] != 'unresolved':
-            stats['skipped'] += 1
-            continue
-
         ref_text = ref['ref_text']
         citation = parse_citation(ref_text)
 

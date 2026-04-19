@@ -1774,7 +1774,7 @@ class QuestionProcessor:
         added = 0
         cds = self.question_object.get("cross_doc_scores", {})
 
-        for ext_file, ext_scores in cds.items():
+        for ext_file, ext_scores in list(cds.items()):
             ext_doc = self._load_external_document(ext_file)
             if ext_doc is None:
                 continue

@@ -366,7 +366,8 @@ def process_file_pair(parse_path: Path, processed_path: Path,
     """
     Diff (and optionally archive) one (parse, processed) file pair.
 
-    Returns (changed, summary_line) — changed=True if any diff was found.
+    Returns (changed, status) where status is one of: 'error', 'new',
+    'unchanged', 'changed', 'archived'.
     """
     if not parse_path.exists():
         print(f"ERROR: Parse output file not found: {parse_path}")
