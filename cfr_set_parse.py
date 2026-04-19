@@ -735,6 +735,9 @@ def parse_section(
         elif tag == 'IMG' or tag == 'GPH':
             # Image element - insert placeholder
             text_parts.append("[Image omitted]")
+        elif tag == 'STARS':
+            # Omission marker: CFR uses * * * to indicate intentionally omitted quoted text.
+            text_parts.append("* * *")
 
     # Resolve the final section_id before key assignment so that table sub-unit
     # keys derive from the deduped container ID rather than the raw parse value.
@@ -1563,6 +1566,9 @@ def _accumulate_method_segments(
         elif tag in ('IMG', 'GPH') or child.tag == 'img':
             _parts().append("[Image omitted]")
             _mark_content()
+        elif tag == 'STARS':
+            _parts().append("* * *")
+            _mark_content()
         elif tag.startswith('DIV'):
             nested_parts = extract_nested_div_content(child, _pending_tables())
             _parts().extend(nested_parts)
@@ -2280,6 +2286,8 @@ def extract_note_text(note_elem: ET.Element) -> str:
                 parts.append(para)
         elif tag == 'IMG' or tag == 'GPH':
             parts.append("[Image omitted]")
+        elif tag == 'STARS':
+            parts.append("* * *")
 
     return ' '.join(parts)
 
@@ -2364,6 +2372,8 @@ def extract_block_text(elem: ET.Element) -> str:
         elif tag == 'IMG' or tag == 'GPH':
             # Image element - insert placeholder
             parts.append("[Image omitted]")
+        elif tag == 'STARS':
+            parts.append("* * *")
 
     return '\n'.join(parts)
 
@@ -2520,6 +2530,8 @@ def extract_nested_div_content(
         elif tag == 'IMG' or tag == 'GPH':
             # Image element - insert placeholder
             text_parts.append("[Image omitted]")
+        elif tag == 'STARS':
+            text_parts.append("* * *")
 
     return text_parts
 
