@@ -80,9 +80,18 @@
       "",
       "STAGE 4: QUESTION ANSWERING",
       "  qa.relevance.score                         - Score item relevance to question",
-      "  qa.analysis.analyze_chunk                  - Analyze chunk for question (iterative)",
-      "  qa.synthesis.cleanup_scratch               - Cleanup scratch document",
       "  qa.synthesis.final_answer                  - Generate final narrative answer",
+      "  qa.analysis.phase1                         - WS8 Phase 1: extract facts from unit",
+      "  qa.analysis.phase2                         - WS8 Phase 2: propose questions/requests from unit",
+      "  qa.analysis.answer_question                - WS8 Phase 3: answer a question from unit context",
+      "  qa.gate.fact                               - WS8 fact gatekeeper (accept/reject/merge)",
+      "  qa.gate.fact_close_match                   - WS8 close-match fact gatekeeper (named-neighbor variant)",
+      "  qa.gate.fact_summary                       - WS8 fact pool running summary update",
+      "  qa.gate.question                           - WS8 question gatekeeper (accept/reject/merge)",
+      "  qa.gate.question_close_match               - WS8 close-match question gatekeeper (named-neighbor variant)",
+      "  qa.gate.request                            - WS8 section request gatekeeper (legacy; superseded by request_materiality)",
+      "  qa.gate.request_materiality                - WS8 section request gatekeeper, materiality variant (reads target text)",
+      "  qa.synthesis.close_question                - WS8 synthesize answers into closed question",
       "",
       "CROSS-REFERENCE REGISTRY",
       "  registry.resolution.ai                     - AI-assisted resolution for unparseable citations (--ai flag)",
@@ -106,9 +115,18 @@
     "stage3.summary.topic_statement": "gpt-5.2",
     "stage3.summary.table": "claude-sonnet-4-5",
     "qa.relevance.score": "gpt-5-mini",
-    "qa.analysis.analyze_chunk": "gpt-5.2",
-    "qa.synthesis.cleanup_scratch": "gpt-5.2",
-    "qa.synthesis.final_answer": "gpt-5.2"
+    "qa.synthesis.final_answer": "gpt-5.2",
+    "qa.analysis.phase1": "gpt-5.2",
+    "qa.analysis.phase2": "gpt-5.2",
+    "qa.analysis.answer_question": "gpt-5.2",
+    "qa.gate.fact": "gpt-5-mini",
+    "qa.gate.fact_close_match": "gpt-5-mini",
+    "qa.gate.fact_summary": "gpt-5-mini",
+    "qa.gate.question": "gpt-5-mini",
+    "qa.gate.question_close_match": "gpt-5-mini",
+    "qa.gate.request": "gpt-5-mini",
+    "qa.gate.request_materiality": "gpt-5-mini",
+    "qa.synthesis.close_question": "gpt-5.2"
   },
 
   "retry": {
@@ -123,9 +141,18 @@
 
     "max_retries_per_model": 3,
     "fallback_models": ["gpt-5.2", "claude-sonnet-4-5"],
-    "qa.analysis.analyze_chunk.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
-    "qa.synthesis.cleanup_scratch.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
     "qa.synthesis.final_answer.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
+    "qa.analysis.phase1.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
+    "qa.analysis.phase2.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
+    "qa.analysis.answer_question.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
+    "qa.gate.fact.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
+    "qa.gate.fact_close_match.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
+    "qa.gate.fact_summary.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
+    "qa.gate.question.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
+    "qa.gate.question_close_match.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
+    "qa.gate.request.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
+    "qa.gate.request_materiality.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
+    "qa.synthesis.close_question.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
     "stage3.summary.topic_statement.fallback_models": ["claude-sonnet-4-5", "claude-opus-4-5"],
 
     "_comment_task_specific_examples": "Task-specific fallback examples (uncomment to use):",
@@ -198,7 +225,22 @@
         "min_items": 5,
         "min_chars": 6000
       }
-    }
+    },
+
+    "_comment_fact_gate_close_match": "WS8 close-match fact gate (task 8.R6). 'threshold' is the SequenceMatcher similarity at or above which a proposed fact is treated as a close-match candidate (routed to qa.gate.fact_close_match with named neighbors). Lower → more facts go through the close-match prompt; higher → more facts use the general gate prompt. 'max_neighbors' caps how many existing facts are surfaced to the close-match prompt.",
+    "fact_gate_close_match": {
+      "threshold": 0.75,
+      "max_neighbors": 3
+    },
+
+    "_comment_question_gate_close_match": "WS8 close-match question gate (task 8.R8). Same shape as fact_gate_close_match but for sub-questions. Questions are typically paraphrased more heavily than facts, so the default threshold is lower (0.65 vs 0.75).",
+    "question_gate_close_match": {
+      "threshold": 0.65,
+      "max_neighbors": 3
+    },
+
+    "_comment_request_gate_text_excerpt_max_chars": "WS8 materiality request gate (task 8.R7). When the gate looks up the requested target section, this caps how many characters of the section's full text are included in the gate prompt. The target's summary is always included; this excerpt is supplementary. Lower → cheaper gate calls but may force the gate to decide on incomplete text; higher → more gate context at greater token cost.",
+    "request_gate_text_excerpt_max_chars": 6000
   },
 
   "_comment_extract_refs_ai_pass": "Run AI resolution pass after Stage 3 (registry/post_stage3.py). Resolves citations with non-standard formatting that regex cannot parse. Uses model assigned to registry.resolution.ai. Default: false (regex-only resolution).",

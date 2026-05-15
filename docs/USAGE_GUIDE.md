@@ -412,8 +412,12 @@ The system uses a model-name-based configuration that supports multiple models f
   },
   "current_engine": "gpt-5-nano",
   "model_assignments": {
-    "qa.analysis.analyze_chunk": "gpt-5",
-    "qa.synthesis.cleanup_scratch": "gpt-5",
+    "qa.analysis.phase1": "gpt-5",
+    "qa.analysis.phase2": "gpt-5",
+    "qa.analysis.answer_question": "gpt-5",
+    "qa.gate.fact": "gpt-5-mini",
+    "qa.gate.question": "gpt-5-mini",
+    "qa.gate.request": "gpt-5-mini",
     "qa.synthesis.final_answer": "gpt-5"
   }
 }

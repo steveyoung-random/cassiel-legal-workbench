@@ -66,7 +66,7 @@ PATTERN_CHECKS = [
         re.compile(r'<TR[\s>]', re.IGNORECASE),
         "html_table_rows",
         "HTML table subdivision (group by first-column value)",
-        50,
+        30,
     ),
     (
         "Multi-method HD1 sections (Method NNN)",

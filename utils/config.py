@@ -332,6 +332,87 @@ def get_level2_tool_use_threshold(config: dict = None) -> int:
     return config.get('processing', {}).get('level2_tool_use_threshold', 40000)
 
 
+def get_fact_gate_close_match_threshold(config: dict = None) -> float:
+    """
+    Get the similarity threshold for routing proposed facts to the close-match gate
+    (WS8 task 8.R6). At or above this threshold, the proposed fact is treated as a
+    close-match candidate and sent to qa.gate.fact_close_match with named neighbors.
+
+    Returns:
+        float: Similarity threshold in [0.0, 1.0] (default: 0.75)
+    """
+    if config is None:
+        config = get_config()
+    return float(config.get('processing', {})
+                       .get('fact_gate_close_match', {})
+                       .get('threshold', 0.75))
+
+
+def get_fact_gate_close_match_max_neighbors(config: dict = None) -> int:
+    """
+    Get the maximum number of close-match neighbors surfaced to the close-match
+    fact gate prompt (WS8 task 8.R6).
+
+    Returns:
+        int: Maximum neighbors to include (default: 3)
+    """
+    if config is None:
+        config = get_config()
+    return int(config.get('processing', {})
+                     .get('fact_gate_close_match', {})
+                     .get('max_neighbors', 3))
+
+
+def get_question_gate_close_match_threshold(config: dict = None) -> float:
+    """
+    Get the similarity threshold for routing proposed sub-questions to the
+    close-match question gate (WS8 task 8.R8). At or above this threshold, the
+    proposed question is treated as a close-match candidate and sent to
+    qa.gate.question_close_match with named neighbors.
+
+    Default is lower than the fact threshold because questions are paraphrased
+    more heavily than facts.
+
+    Returns:
+        float: Similarity threshold in [0.0, 1.0] (default: 0.65)
+    """
+    if config is None:
+        config = get_config()
+    return float(config.get('processing', {})
+                       .get('question_gate_close_match', {})
+                       .get('threshold', 0.65))
+
+
+def get_question_gate_close_match_max_neighbors(config: dict = None) -> int:
+    """
+    Get the maximum number of close-match neighbors surfaced to the close-match
+    question gate prompt (WS8 task 8.R8).
+
+    Returns:
+        int: Maximum neighbors to include (default: 3)
+    """
+    if config is None:
+        config = get_config()
+    return int(config.get('processing', {})
+                     .get('question_gate_close_match', {})
+                     .get('max_neighbors', 3))
+
+
+def get_request_gate_text_excerpt_max_chars(config: dict = None) -> int:
+    """
+    Get the maximum number of characters of a requested section's text to include
+    in the materiality request gate prompt (WS8 task 8.R7). The target's summary
+    is always included; this excerpt is supplementary.
+
+    Returns:
+        int: Maximum character count (default: 6000)
+    """
+    if config is None:
+        config = get_config()
+    return int(config.get('processing', {})
+                     .get('request_gate_text_excerpt_max_chars', 6000))
+
+
 def get_qa_mode_config(mode_name: str = None, config: dict = None) -> dict:
     """
     Get configuration for a Q&A mode. Returns default if mode not found.

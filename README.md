@@ -197,9 +197,9 @@ I have been working on this project for about a year and a half.  I see a lot mo
 
 Although I have been working on this system for a long time, and it is useable as it is, there are a list of future improvements and new capabilities that I intend to add.  Here are some highlights:
 
-- A content refresh mechanism: when a source document is updated, detect what changed and re-process only the affected units, rather than reprocessing the whole document (Workstream 4).
-- A redesigned question answering pipeline using role-separated phases (fact extraction question generation, answer collection) with a gatekeeper LLM reviewing each proposed fact before it enters the shared scratch document.  This addresses the current tendency toward fact churn and unfocused question accumulation in long documents (Workstream 8).
-- Systematic end-to-end testing across all four document types, and additional edge cases such as very long documents and deep nesting (Workstream 5).
+- A redesigned question answering pipeline using role-separated phases (fact extraction, question generation, answer collection) with a gatekeeper LLM reviewing each proposed fact before it enters the shared scratch document.  This addresses the current tendency toward fact churn and unfocused question accumulation in long documents (Workstream 8).
+- AI-generated descriptions for embedded images and mathematical expressions, stored in the parsed JSON so downstream stages can reference them (Workstream 13).
+- Additional edge-case testing across all four document types (Workstream 5).
 
 Some future work is described in the [PLANNED_ENHANCEMENTS](docs/PLANNED_ENHANCEMENTS.md) document.
 

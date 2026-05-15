@@ -10,9 +10,8 @@ High-level responsibilities:
 - Score each operational unit (section, article, etc.) for relevance.
 - Run iterative, per-unit/per-chunk AI "analyst" passes that:
   - View a keyhole slice of the document (their own unit/chunk + narrow context).
-  - Read and append to a shared scratch document (facts, questions, answers, requests).
-- After iterations stabilize, run a separate cleanup / answer-synthesis phase
-  to produce a final answer and a pruned scratch document.
+  - Propose facts, questions, and section requests for gatekeeper review.
+- After WS8 rounds stabilize, synthesize a final answer from the gated scratch document.
 
 CLI usage (mirrors Ask_Question.py):
     python question_answering.py path/to/file.html "What is the question?" 
@@ -29,6 +28,7 @@ import json
 import os
 import re
 import sys
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Tuple, Optional
 
 from utils import (
@@ -61,46 +61,36 @@ from utils.document_handling import _resolve_param_key
 
 class ScratchDocumentManager:
     """
-    Manage the shared scratch document used by all analyst passes.
+    Manage the shared scratch document used by all analyst passes (WS8 schema).
 
     Structure (stored under question_object['scratch']):
       {
-        "fact": {
-          "fact_001": {
-            "content": "Text of fact.",
-            "source": ["Section 5"],
-            "importance": 2
-          },
-          ...
-        },
-        "question": {
-          "q_001": {
-            "content": "Clarifying question.",
-            "source": ["Section 5"],
-            "answers": {
-              "a_001": {
-                "content": "Partial answer.",
-                "source": ["Article 12"]
-              }
-            }
-          },
-          ...
-        },
-        "requests": {
-          "r_001": {
-            "action": "request_detail",
-            "target_type": "Section",
-            "target_number": "215",
-            "detail_level": "summary_2",
-            "source": ["Section 5"]
-          },
-          ...
-        }
+        "primary_question": "...",
+        "facts": [
+          {"id": "f001", "content": "...", "source_units": ["Section 5", "Article 12"]}
+        ],
+        "questions": [
+          {
+            "id": "q001",
+            "text": "...",
+            "status": "open",          // "open" | "closed"
+            "proposed_by": ["Section 5"],
+            "seen_by": ["Section 5"],  // units that have been offered this question
+            "answers": [
+              {"unit_id": "Section 5", "text": "...", "substantive": true}
+            ],
+            "synthesis": null,         // set when closed
+            "derivation_depth": 0
+          }
+        ],
+        "hypotheses": [],              // Phase 8B placeholder
+        "final_answer": null,
+        "fact_pool_summary": "",       // running compressed summary of all facts
+        "unresolved_questions": []
       }
 
-    This manager enforces an append-only discipline for analyst passes:
-    analysts may add entries and answers, but never delete or overwrite
-    existing content.
+    Requests are not stored in scratch — they are consumed inline by the
+    orchestrator and never shown to analysts.
     """
 
     def __init__(self, question_object: Dict[str, Any], source_doc_label: Optional[str] = None):
@@ -109,287 +99,996 @@ class ScratchDocumentManager:
         if "scratch" not in self.question_object:
             self.question_object["scratch"] = {}
         scratch = self.question_object["scratch"]
-        if "fact" not in scratch:
-            scratch["fact"] = {}
-        if "question" not in scratch:
-            scratch["question"] = {}
-        if "requests" not in scratch:
-            scratch["requests"] = {}
+        scratch.setdefault("primary_question",
+                           question_object.get("question", {}).get("text", ""))
+        scratch.setdefault("facts", [])
+        scratch.setdefault("questions", [])
+        scratch.setdefault("hypotheses", [])
+        if "final_answer" not in scratch:
+            scratch["final_answer"] = None
+        scratch.setdefault("fact_pool_summary", "")
+        scratch.setdefault("unresolved_questions", [])
 
-    # Convenience property
     @property
     def scratch(self) -> Dict[str, Any]:
         return self.question_object["scratch"]
+
+    @property
+    def facts(self) -> List[Dict[str, Any]]:
+        return self.scratch["facts"]
+
+    @property
+    def questions(self) -> List[Dict[str, Any]]:
+        return self.scratch["questions"]
 
     # ------------------------------------------------------------------
     # ID helpers
     # ------------------------------------------------------------------
 
-    def _next_id(self, category: str, prefix: str) -> str:
-        """
-        Generate the next sequential ID for a given scratch category.
-        E.g. prefix='fact' in category='fact' -> 'fact_001', 'fact_002', ...
-        """
-        bucket = self.scratch.get(category, {})
-        n = len(bucket) + 1
-        candidate = f"{prefix}_{n:03d}"
-        while candidate in bucket:
+    def _next_fact_id(self) -> str:
+        existing = {f["id"] for f in self.facts}
+        n = len(self.facts) + 1
+        while f"f{n:03d}" in existing:
             n += 1
-            candidate = f"{prefix}_{n:03d}"
-        return candidate
+        return f"f{n:03d}"
+
+    def _next_question_id(self) -> str:
+        existing = {q["id"] for q in self.questions}
+        n = len(self.questions) + 1
+        while f"q{n:03d}" in existing:
+            n += 1
+        return f"q{n:03d}"
+
+    def _label(self, unit_id: str) -> str:
+        """Append source_doc_label when present."""
+        if self.source_doc_label:
+            return f"{unit_id} ({self.source_doc_label})"
+        return unit_id
 
     # ------------------------------------------------------------------
-    # Core operations (append-only)
+    # Fact operations
     # ------------------------------------------------------------------
 
-    def add_entry(
-        self,
-        entry_type: str,
-        content: str,
-        source_label: str,
-        importance: Optional[int] = None,
-    ) -> Tuple[bool, Optional[str]]:
-        """
-        Add a new fact or question entry. ID is auto-generated.
-
-        Returns (True, question_id) if a question was added, (True, None) if a fact was added, (False, None) otherwise.
-        """
-        if entry_type not in ("fact", "question"):
-            return False, None
-        if not content.strip():
-            return False, None
-
-        if entry_type not in self.scratch:
-            self.scratch[entry_type] = {}
-
-        bucket = self.scratch[entry_type]
-        new_id = self._next_id(entry_type, entry_type)
-        bucket[new_id] = {
+    def add_fact(self, content: str, source_unit: str) -> str:
+        """Add a new fact; return its ID. Gating is caller's responsibility."""
+        fact_id = self._next_fact_id()
+        self.facts.append({
+            "id": fact_id,
             "content": content.strip(),
-            "source": [source_label],
-        }
-        if importance is not None and entry_type == "question":
-            # Only questions get importance in this simplified schema.
-            bucket[new_id]["importance"] = int(importance)
+            "source_units": [self._label(source_unit)],
+        })
+        return fact_id
 
-        # Return question_id if a question was added
-        question_id = new_id if entry_type == "question" else None
-        return True, question_id
-
-    def add_answer(
-        self,
-        question_id: str,
-        content: str,
-        source_label: str,
-    ) -> bool:
-        """
-        Add an answer under an existing question. ID is auto-generated.
-
-        Returns True if an answer was added.
-        """
-        if "question" not in self.scratch:
-            return False
-        questions = self.scratch["question"]
-        if question_id not in questions:
-            # Unknown question id; ignore but do not error.
-            return False
-
-        q = questions[question_id]
-        if "answers" not in q:
-            q["answers"] = {}
-        answers = q["answers"]
-
-        n = len(answers) + 1
-        new_id = f"answer_{n:03d}"
-        while new_id in answers:
-            n += 1
-            new_id = f"answer_{n:03d}"
-
-        answers[new_id] = {
-            "content": content.strip(),
-            "source": [source_label],
-        }
-        return True
-
-    def add_section_reference(self, question_id: str, source_label: str) -> bool:
-        """
-        Record that a question is also relevant to another section/article.
-        Mirrors the 'add_section' action from Ask_Question.py.
-        """
-        if "question" not in self.scratch:
-            return False
-        questions = self.scratch["question"]
-        if question_id not in questions:
-            return False
-        q = questions[question_id]
-        if "source" not in q:
-            q["source"] = []
-        if source_label not in q["source"]:
-            q["source"].append(source_label)
-            return True
+    def merge_fact(self, fact_id: str, source_unit: str,
+                   updated_content: Optional[str] = None) -> bool:
+        """Add a source to an existing fact; optionally replace content."""
+        label = self._label(source_unit)
+        for fact in self.facts:
+            if fact["id"] == fact_id:
+                if label not in fact["source_units"]:
+                    fact["source_units"].append(label)
+                if updated_content:
+                    fact["content"] = updated_content.strip()
+                return True
         return False
 
-    def add_detail_request(
-        self,
-        target_type: str,
-        target_number: str,
-        detail_level: str,
-        source_label: str,
-    ) -> bool:
-        """
-        Add a request_detail entry asking for more detail about another unit. ID is auto-generated.
-        """
-        if not target_type or not target_number or not detail_level:
-            return False
-        if "requests" not in self.scratch:
-            self.scratch["requests"] = {}
-        bucket = self.scratch["requests"]
-        new_id = self._next_id("requests", "request")
-        bucket[new_id] = {
-            "action": "request_detail",
-            "target_type": target_type,
-            "target_number": target_number,
-            "detail_level": detail_level,
-            "source": [source_label],
-        }
-        return True
+    def get_fact_by_id(self, fact_id: str) -> Optional[Dict[str, Any]]:
+        for fact in self.facts:
+            if fact["id"] == fact_id:
+                return fact
+        return None
 
-    def add_relevant_section_request(
-        self,
-        target_type: str,
-        target_number: str,
-        source_label: str,
-    ) -> bool:
-        """
-        Add a request_relevant_section entry asking that another section be added
-        to the analysis because it is highly likely to affect the answer. ID is auto-generated.
-        """
-        if not target_type or not target_number:
-            return False
-        if "requests" not in self.scratch:
-            self.scratch["requests"] = {}
-        bucket = self.scratch["requests"]
-        new_id = self._next_id("requests", "request")
-        bucket[new_id] = {
-            "action": "request_relevant_section",
-            "target_type": target_type,
-            "target_number": target_number,
-            "source": [source_label],
-        }
-        return True
+    @property
+    def fact_count(self) -> int:
+        return len(self.facts)
 
     # ------------------------------------------------------------------
-    # Applying analyst actions
+    # Question operations
     # ------------------------------------------------------------------
 
-    def apply_action(
+    def add_question(
         self,
-        item_type_name: str,
-        item_num: str,
-        action_object: Dict[str, Any],
-    ) -> Tuple[bool, Optional[str], Optional[str]]:
+        text: str,
+        proposed_by_unit: str,
+        rationale: str = "",
+        derivation_depth: int = 0,
+    ) -> str:
+        """Add a new open question; return its ID."""
+        q_id = self._next_question_id()
+        self.questions.append({
+            "id": q_id,
+            "text": text.strip(),
+            "rationale": rationale.strip(),
+            "status": "open",
+            "proposed_by": [self._label(proposed_by_unit)],
+            "seen_by": [],
+            "answers": [],
+            "synthesis": None,
+            "derivation_depth": derivation_depth,
+            "supporting_fact_ids": [],
+        })
+        return q_id
+
+    def merge_question(self, question_id: str, additional_proposer: str) -> bool:
+        """Record that another unit also proposed this question."""
+        label = self._label(additional_proposer)
+        for q in self.questions:
+            if q["id"] == question_id:
+                if label not in q["proposed_by"]:
+                    q["proposed_by"].append(label)
+                return True
+        return False
+
+    def mark_question_seen(self, question_id: str, unit_id: str) -> bool:
+        """Record that a unit has been offered this question."""
+        label = self._label(unit_id)
+        for q in self.questions:
+            if q["id"] == question_id:
+                if label not in q["seen_by"]:
+                    q["seen_by"].append(label)
+                return True
+        return False
+
+    def add_answer(self, question_id: str, unit_id: str, text: str,
+                   substantive: bool = True) -> bool:
+        """Record an answer; also marks the unit as having seen the question."""
+        label = self._label(unit_id)
+        for q in self.questions:
+            if q["id"] == question_id:
+                q["answers"].append({
+                    "unit_id": label,
+                    "text": text.strip(),
+                    "substantive": substantive,
+                })
+                if label not in q["seen_by"]:
+                    q["seen_by"].append(label)
+                return True
+        return False
+
+    def close_question(self, question_id: str, synthesis: str) -> bool:
+        """Mark a question closed with a synthesized answer."""
+        for q in self.questions:
+            if q["id"] == question_id:
+                q["status"] = "closed"
+                q["synthesis"] = synthesis.strip() if synthesis else ""
+                return True
+        return False
+
+    def get_open_questions(self) -> List[Dict[str, Any]]:
+        return [q for q in self.questions if q["status"] == "open"]
+
+    def is_question_exhausted(self, question: Dict[str, Any],
+                               active_unit_labels: set) -> bool:
+        """True if every active unit has been offered this question."""
+        return active_unit_labels.issubset(set(question["seen_by"]))
+
+    def get_workable_open_questions(self, active_unit_labels: set) -> List[Dict[str, Any]]:
+        """Open questions that have not yet been offered to all active units."""
+        return [q for q in self.questions
+                if q["status"] == "open"
+                and not self.is_question_exhausted(q, active_unit_labels)]
+
+    def get_unseen_questions_for_unit(self, unit_id: str) -> List[Dict[str, Any]]:
+        """Open questions the given unit has not yet been offered."""
+        label = self._label(unit_id)
+        return [q for q in self.questions
+                if q["status"] == "open" and label not in q["seen_by"]]
+
+    def get_substantive_responders(self, question_id: str) -> List[str]:
+        """Return unit labels that gave substantive answers to this question."""
+        for q in self.questions:
+            if q["id"] == question_id:
+                return [a["unit_id"] for a in q["answers"] if a.get("substantive", True)]
+        return []
+
+    @property
+    def open_question_count(self) -> int:
+        return sum(1 for q in self.questions if q["status"] == "open")
+
+    # ------------------------------------------------------------------
+    # Fact pool context for gatekeepers
+    # ------------------------------------------------------------------
+
+    def get_fact_pool_context(self, threshold_chars: int = 15000) -> str:
         """
-        Apply a single action object returned by an analyst.
+        Return a context string describing the current fact pool.
 
-        Supported actions:
-          - add_entry
-          - add_answer
-          - add_section
-          - request_detail
-          - request_relevant_section
-
-        Returns (changed, question_id_added, question_id_answered):
-          - changed: True if the scratch document was modified
-          - question_id_added: ID of question added (if any), None otherwise
-          - question_id_answered: ID of question answered (if any), None otherwise
+        If total fact text is under threshold: full list.
+        If over: running summary as header, then the most-recent facts in full
+        until the threshold is reached (from the newest end backward).
         """
-        changed = False
-        question_id_added = None
-        question_id_answered = None
-        source_label = f"{item_type_name.capitalize()} {item_num}"
-        if self.source_doc_label:
-            source_label += f" ({self.source_doc_label})"
+        if not self.facts:
+            return "(No facts collected yet.)"
 
-        if "action" not in action_object:
-            return False, None, None
+        lines = [
+            f"[{f['id']}] {f['content']}  (sources: {', '.join(f['source_units'])})"
+            for f in self.facts
+        ]
+        full_text = "\n".join(lines)
 
-        action = action_object["action"]
+        if len(full_text) <= threshold_chars:
+            return f"Established facts:\n{full_text}"
 
-        if action == "add_entry":
-            entry = action_object.get("entry", {})
-            entry_type = entry.get("type")
-            content = entry.get("content", "")
-            importance = entry.get("importance")
-            added, q_id = self.add_entry(entry_type, content, source_label, importance)
-            if added:
-                changed = True
-                question_id_added = q_id
+        # Over threshold: summary header + most-recent facts in full
+        summary = self.scratch.get("fact_pool_summary", "")
+        header = (f"Summary of established facts:\n{summary}\n\nMost recent facts (full detail):\n"
+                  if summary else "Most recent facts (full detail):\n")
+        remaining = threshold_chars - len(header)
+        recent: List[str] = []
+        for line in reversed(lines):
+            if len(line) + 1 > remaining:
+                break
+            recent.insert(0, line)
+            remaining -= len(line) + 1
+        return header + "\n".join(recent)
 
-        elif action == "add_answer":
-            question_id = str(action_object.get("question_id", ""))
-            answer = action_object.get("answer", {})
-            content = answer.get("content", "")
-            if self.add_answer(question_id, content, source_label):
-                changed = True
-                question_id_answered = question_id
+    def update_fact_pool_summary(self, new_summary: str) -> None:
+        self.scratch["fact_pool_summary"] = new_summary
 
-        elif action == "add_section":
-            question_id = str(action_object.get("question_id", ""))
-            if self.add_section_reference(question_id, source_label):
-                changed = True
 
-        elif action == "request_detail":
-            target_type = str(action_object.get("target_type", "")).strip()
-            target_number = str(action_object.get("target_number", "")).strip()
-            detail_level = str(action_object.get("detail_level", "")).strip()
-            if self.add_detail_request(
-                target_type,
-                target_number,
-                detail_level,
-                source_label,
-            ):
-                changed = True
+# ---------------------------------------------------------------------------
+# Gatekeeper functions (Tasks 8.3 / 8.5 / 8.R6)
+# ---------------------------------------------------------------------------
 
-        elif action == "request_relevant_section":
-            target_type = str(action_object.get("target_type", "")).strip()
-            target_number = str(action_object.get("target_number", "")).strip()
-            if self.add_relevant_section_request(
-                target_type,
-                target_number,
-                source_label,
-            ):
-                changed = True
+# Close-match fact gate (task 8.R6) — see WORKSTREAM_8_PLAN.md.
+# Facts whose normalized text matches an existing fact exactly are auto-merged
+# (no LLM call). Facts whose similarity to any existing fact is at or above the
+# configured threshold are routed to a specialized close-match gate prompt that
+# names the top neighbors and asks whether the difference is material.
+# Tunables live in config.json (processing.fact_gate_close_match.threshold and
+# .max_neighbors), accessed via utils/config.py.
 
-        # Unknown actions are ignored (append-only discipline).
-        return changed, question_id_added, question_id_answered
 
-    def apply_actions(
-        self,
-        item_type_name: str,
-        item_num: str,
-        actions: List[Dict[str, Any]],
-    ) -> Tuple[bool, List[str], List[str]]:
-        """
-        Apply a list of action objects.
-        
-        Returns (changed, question_ids_added, question_ids_answered):
-          - changed: True if any change occurred
-          - question_ids_added: List of question IDs that were added
-          - question_ids_answered: List of question IDs that were answered
-        """
-        changed = False
-        question_ids_added = []
-        question_ids_answered = []
-        for action in actions:
-            if isinstance(action, dict):
-                action_changed, q_id_added, q_id_answered = self.apply_action(item_type_name, item_num, action)
-                if action_changed:
-                    changed = True
-                if q_id_added:
-                    question_ids_added.append(q_id_added)
-                if q_id_answered:
-                    question_ids_answered.append(q_id_answered)
-        return changed, question_ids_added, question_ids_answered
+def _normalize_fact_text(text: str) -> str:
+    """Normalize whitespace and curly-quote variants for exact-equivalence checks."""
+    if not text:
+        return ""
+    t = re.sub(r"[“”‘’`]", '"', text)
+    t = re.sub(r"\s+", " ", t).strip().lower()
+    return t
+
+
+def _texts_equivalent(a: str, b: str) -> bool:
+    return _normalize_fact_text(a) == _normalize_fact_text(b)
+
+
+def _find_close_match_neighbors(
+    proposed: str,
+    items: List[Dict[str, Any]],
+    threshold: float,
+    max_neighbors: int,
+    content_key: str = "content",
+) -> List[Tuple[float, Dict[str, Any]]]:
+    """Return top-N pool items with similarity >= threshold to the proposed text,
+    sorted by similarity descending. The content_key controls which dict field
+    holds the text to compare — 'content' for facts, 'text' for questions."""
+    p_norm = _normalize_fact_text(proposed)
+    if not p_norm:
+        return []
+    scored: List[Tuple[float, Dict[str, Any]]] = []
+    for item in items:
+        i_norm = _normalize_fact_text(item.get(content_key, ""))
+        if not i_norm:
+            continue
+        sim = SequenceMatcher(None, p_norm, i_norm).ratio()
+        if sim >= threshold:
+            scored.append((sim, item))
+    scored.sort(key=lambda x: -x[0])
+    return scored[:max_neighbors]
+
+
+def _gate_close_match_fact(
+    client,
+    config: Optional[Dict],
+    logfile: str,
+    primary_question: str,
+    proposed_content: str,
+    source_unit: str,
+    neighbors: List[Tuple[float, Dict[str, Any]]],
+    question_context: Optional[str] = None,
+    question_rationale: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Close-match variant of the fact gate (task qa.gate.fact_close_match).
+
+    Invoked when the proposed fact has at least one pool neighbor above the
+    similarity threshold. The prompt cites the named neighbors and frames the
+    decision narrowly: accept only if the difference is material enough that
+    merging would mislead. Verdict options: accept or merge (no reject — by
+    construction the fact is closely related to established material).
+
+    When question_context (a sub-question) and question_rationale (the bridge
+    justification produced by the question proposer) are both present, the
+    prompt instructs the gate to evaluate the proposed fact against both the
+    sub-question AND the primary question via the rationale-bridge.
+    """
+    if question_context:
+        rationale_clause = (
+            f"\nRationale connecting this sub-question to the primary question: "
+            f"\"{question_rationale}\""
+        ) if question_rationale else ""
+        question_being_evaluated = (
+            f"Sub-question being evaluated: {question_context}{rationale_clause}\n"
+            f"(Primary question for context: {primary_question})"
+        )
+    else:
+        question_being_evaluated = f"Question being evaluated: {primary_question}"
+
+    neighbor_lines = [
+        f"[{fact['id']}] \"{fact['content']}\"  (similarity: {sim:.2f})"
+        for sim, fact in neighbors
+    ]
+    neighbor_block = "\n".join(neighbor_lines)
+
+    prompt = (
+        f"{question_being_evaluated}\n\n"
+        f"The following existing pool fact(s) are very similar to a newly proposed fact:\n"
+        f"{neighbor_block}\n\n"
+        f"Proposed new fact from {source_unit}:\n\"{proposed_content}\"\n\n"
+        "Accept the proposed fact as a NEW fact only if its difference from the closest "
+        "existing fact above is MATERIAL — that is, merging the two would lose important "
+        "information or mislead a reader about the rule, scope, condition, or exception "
+        "the fact describes. Differences in wording, citation form, level of paraphrase, "
+        "or the addition of inconsequential detail are NOT material; in those cases, "
+        "merge into the closest matching existing fact.\n\n"
+        "If you merge, cite the existing fact's ID. You may optionally supply an improved "
+        "merged statement that preserves wording or citations worth keeping from either fact.\n\n"
+        "Respond with ONLY a JSON object in one of these exact forms:\n"
+        '{"verdict": "accept"}\n'
+        '{"verdict": "merge", "merge_fact_id": "f001"}\n'
+        '{"verdict": "merge", "merge_fact_id": "f001", "merged_content": "Combined statement."}\n'
+    )
+
+    try:
+        result = query_json(client, [], prompt, logfile, max_tokens=500,
+                            config=config, task_name="qa.gate.fact_close_match")
+    except Exception:
+        # Fail-conservative: merge with closest neighbor (avoid leaking a duplicate).
+        return {"verdict": "merge", "merge_fact_id": neighbors[0][1]["id"]}
+
+    if not isinstance(result, dict):
+        return {"verdict": "merge", "merge_fact_id": neighbors[0][1]["id"]}
+
+    verdict = str(result.get("verdict", "merge")).strip().lower()
+    if verdict == "accept":
+        return {"verdict": "accept"}
+
+    out: Dict[str, Any] = {"verdict": "merge"}
+    fid = str(result.get("merge_fact_id", "")).strip()
+    neighbor_ids = {fact["id"] for _, fact in neighbors}
+    if fid in neighbor_ids:
+        out["merge_fact_id"] = fid
+        mc = str(result.get("merged_content", "")).strip()
+        if mc:
+            out["merged_content"] = mc
+    else:
+        # Cited ID wasn't one of the neighbors — fall back to closest match.
+        out["merge_fact_id"] = neighbors[0][1]["id"]
+    return out
+
+
+def _gate_and_merge_fact(
+    scratch_manager: "ScratchDocumentManager",
+    client,
+    config: Optional[Dict],
+    logfile: str,
+    primary_question: str,
+    proposed_content: str,
+    source_unit: str,
+    question_context: Optional[str] = None,
+    close_match_client=None,
+    question_rationale: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Gate a proposed fact against the current fact pool (task qa.gate.fact).
+
+    Returns one of:
+      {"verdict": "accept"}
+      {"verdict": "reject"}
+      {"verdict": "merge", "merge_fact_id": "f001"}
+      {"verdict": "merge", "merge_fact_id": "f001", "merged_content": "..."}
+
+    Pre-gate similarity check (task 8.R6):
+    - If the proposed fact is text-equivalent to an existing fact (after whitespace
+      and quote normalization), auto-merge with no AI call.
+    - If the proposed fact has any pool neighbor at or above the close-match
+      threshold, route to _gate_close_match_fact (the specialized prompt that
+      names the neighbors) using close_match_client (which may be bound to a
+      different model than the general gate client). Falls back to client if
+      close_match_client is None.
+    - Otherwise, fall through to the general gate prompt below.
+
+    Rationale-bridging (task 8.R8): when gating against a sub-question (i.e.,
+    question_context is provided), question_rationale carries the proposer's
+    stated reason the sub-question's answer would matter for the primary
+    question. The prompt requires the fact to (a) help answer the sub-question
+    AND (b) plausibly affect the primary answer via that rationale.
+
+    No empty-pool shortcut: even the first fact ever proposed must pass the
+    relevance criteria (and the rationale-bridge criterion when applicable).
+    The general gate prompt handles the empty-pool case gracefully — the
+    fact_pool_ctx becomes "(No facts collected yet.)" and only accept/reject
+    are reachable (merge requires a pool entry).
+    """
+    # Pre-gate similarity check (thresholds from config; see processing.fact_gate_close_match)
+    from utils.config import (
+        get_fact_gate_close_match_threshold,
+        get_fact_gate_close_match_max_neighbors,
+    )
+    neighbors = _find_close_match_neighbors(
+        proposed_content,
+        scratch_manager.facts,
+        threshold=get_fact_gate_close_match_threshold(config),
+        max_neighbors=get_fact_gate_close_match_max_neighbors(config),
+    )
+    if neighbors:
+        top_sim, top_fact = neighbors[0]
+        # Exact match: auto-merge, no AI call
+        if _texts_equivalent(proposed_content, top_fact.get("content", "")):
+            return {"verdict": "merge", "merge_fact_id": top_fact["id"]}
+        # Close match: specialized prompt decides the dedup question. On `merge`,
+        # return immediately. On `accept` (= materially distinct from named
+        # neighbors), FALL THROUGH to the general gate below so the proposed fact
+        # is still subject to the relevance criteria and the rationale-bridge
+        # criterion when gating against a sub-question. Material distinctness
+        # from existing facts is necessary but not sufficient.
+        cm_result = _gate_close_match_fact(
+            close_match_client or client, config, logfile,
+            primary_question, proposed_content, source_unit, neighbors,
+            question_context=question_context,
+            question_rationale=question_rationale,
+        )
+        if cm_result.get("verdict") == "merge":
+            return cm_result
+        # Else (accept): fall through to general gate below.
+
+    fact_pool_ctx = scratch_manager.get_fact_pool_context()
+
+    if question_context:
+        rationale_clause = (
+            f"\nRationale connecting this sub-question to the primary question: "
+            f"\"{question_rationale}\""
+        ) if question_rationale else ""
+        question_being_evaluated = (
+            f"Sub-question being evaluated: {question_context}{rationale_clause}\n"
+            f"(Primary question for context: {primary_question})"
+        )
+    else:
+        question_being_evaluated = f"Question being evaluated: {primary_question}"
+
+    # When gating against a sub-question with a rationale, add the rationale-bridge
+    # criterion that requires the fact to plausibly affect the primary answer.
+    bridge_criterion = ""
+    if question_context and question_rationale:
+        bridge_criterion = (
+            "\n\nIMPORTANT — RATIONALE BRIDGE: When gating against a sub-question, the "
+            "fact must satisfy BOTH of the following:\n"
+            "(a) The fact materially helps answer the sub-question on its own terms; AND\n"
+            "(b) In light of the rationale above (which states why the sub-question's "
+            "answer would matter to the primary question), the fact must plausibly affect "
+            "or sharpen the answer to the PRIMARY question. Reject if (b) fails: a fact "
+            "that answers the sub-question but whose content would not change the answer "
+            "to the primary question does not belong in this pool. Patterns that commonly "
+            "fail (b): procedural mechanics of unrelated provisions; enforcement remedies "
+            "that only matter once a violation is established; rules governing a different "
+            "actor than the primary question concerns; definitions used elsewhere in the "
+            "same article that do not bear on the primary subject."
+        )
+
+    prompt = (
+        f"{question_being_evaluated}\n\n"
+        f"{fact_pool_ctx}\n\n"
+        f"Proposed new fact from {source_unit}:\n\"{proposed_content}\"\n\n"
+        "Decide whether to accept, reject, or merge this proposed fact.\n\n"
+        "ACCEPT if the fact provides a specific piece of information that would appear in — "
+        "or be directly cited by — a correct, complete answer to the question. This includes:\n"
+        "- Substantive rules, requirements, obligations, or permissions that specifically "
+        "name or govern the subject of the question\n"
+        "- Definitions of terms that appear in the question or in a governing rule, where "
+        "the definition could affect who or what is covered by that rule\n"
+        "- Exceptions, conditions, or qualifications that bear directly on the subject of "
+        "the question\n"
+        "If you are uncertain whether to accept, apply this tiebreaker: would a reader who "
+        "had all other established facts but not this one notice its absence in a correct "
+        "answer? If yes, accept. If the answer would be equally complete and accurate "
+        "without it, reject.\n\n"
+        "REJECT if any of the following apply:\n"
+        "- The fact addresses the broader topic or legal area of the question but does not "
+        "specifically address what the question asks — being in the same legal instrument or "
+        "subject area is not sufficient; the fact must bear on the specific matter the "
+        "question asks about\n"
+        "- The fact's connection to the question subject depends on an inferential chain not "
+        "stated in the fact itself or in the existing fact pool — the fact is about topic X, "
+        "but establishing that X is relevant to the question requires reasoning such as "
+        "'X applies to Y, and Y sometimes involves the question subject'\n"
+        "- The fact is general background, document scope, or structural information that "
+        "does not state a substantive rule bearing on the question subject\n"
+        "- The same information is already captured at sufficient generality by an existing fact\n\n"
+        "MERGE if the proposed fact and an existing fact convey the same essential information "
+        "— a reader of both would learn nothing from the second that they did not already know "
+        "from the first — but the proposed fact adds wording, specificity, or a source "
+        "citation worth preserving. Provide the existing fact's ID and an optional improved "
+        "combined statement. Do not merge facts that make genuinely distinct points even if "
+        "they concern the same section or rule."
+        f"{bridge_criterion}\n\n"
+        "Respond with ONLY a JSON object in one of these exact forms:\n"
+        '{"verdict": "accept"}\n'
+        '{"verdict": "reject"}\n'
+        '{"verdict": "merge", "merge_fact_id": "f001"}\n'
+        '{"verdict": "merge", "merge_fact_id": "f001", "merged_content": "Combined statement."}\n'
+    )
+
+    try:
+        result = query_json(client, [], prompt, logfile, max_tokens=500,
+                            config=config, task_name="qa.gate.fact")
+    except Exception:
+        return {"verdict": "accept"}  # fail-open
+
+    if not isinstance(result, dict):
+        return {"verdict": "accept"}
+
+    verdict = str(result.get("verdict", "accept")).strip().lower()
+    if verdict not in ("accept", "reject", "merge"):
+        verdict = "accept"
+
+    out: Dict[str, Any] = {"verdict": verdict}
+    if verdict == "merge":
+        fid = str(result.get("merge_fact_id", "")).strip()
+        if fid and scratch_manager.get_fact_by_id(fid):
+            out["merge_fact_id"] = fid
+            mc = str(result.get("merged_content", "")).strip()
+            if mc:
+                out["merged_content"] = mc
+        else:
+            out["verdict"] = "accept"  # referenced ID not found — just accept
+
+    return out
+
+
+def _update_fact_pool_summary(
+    scratch_manager: "ScratchDocumentManager",
+    client,
+    config: Optional[Dict],
+    logfile: str,
+    primary_question: str,
+) -> None:
+    """
+    Update the running fact pool summary (task qa.gate.fact_summary).
+
+    No-op when fewer than 5 facts (the full pool is always shown below the threshold).
+    """
+    if scratch_manager.fact_count < 5:
+        return
+
+    facts_text = "\n".join(
+        f"[{f['id']}] {f['content']}"
+        for f in scratch_manager.facts
+    )
+    current_summary = scratch_manager.scratch.get("fact_pool_summary", "")
+
+    prompt = (
+        f"Primary question: {primary_question}\n\n"
+        f"Current summary: {current_summary or '(none yet)'}\n\n"
+        f"All current facts:\n{facts_text}\n\n"
+        "Write a concise 3–5 sentence summary describing what has been established "
+        "so far about the primary question. Focus on key findings, patterns, "
+        "and any notable gaps.\n"
+        "Respond with only the summary text, no JSON wrapper.\n"
+    )
+
+    try:
+        new_summary = query_text_with_retry(
+            client, [], prompt, logfile, max_tokens=500,
+            config=config, task_name="qa.gate.fact_summary",
+        )
+        if new_summary and new_summary.strip():
+            scratch_manager.update_fact_pool_summary(new_summary.strip())
+    except Exception:
+        pass
+
+
+def _gate_close_match_question(
+    client,
+    config: Optional[Dict],
+    logfile: str,
+    primary_question: str,
+    proposed_question: str,
+    proposed_by_unit: str,
+    rationale: str,
+    neighbors: List[Tuple[float, Dict[str, Any]]],
+) -> Dict[str, Any]:
+    """
+    Close-match variant of the question gate (task qa.gate.question_close_match).
+
+    Invoked when the proposed sub-question has at least one open-question neighbor
+    above the similarity threshold. The prompt cites the named neighbors and frames
+    the decision narrowly: accept only if the proposed question would extract
+    substantively different facts or shed light on a different aspect of the
+    primary question. Verdict options: accept or merge (no reject — by construction
+    the proposed question is closely related to an existing one).
+    """
+    neighbor_lines = [
+        f"[{q['id']}] \"{q['text']}\"  (similarity: {sim:.2f})"
+        for sim, q in neighbors
+    ]
+    neighbor_block = "\n".join(neighbor_lines)
+    rationale_block = (
+        f"Analyst's rationale: \"{rationale}\"\n\n" if rationale else ""
+    )
+
+    prompt = (
+        f"Primary question: {primary_question}\n\n"
+        f"The following existing open question(s) are very similar to a newly proposed "
+        f"sub-question:\n{neighbor_block}\n\n"
+        f"Proposed new sub-question from {proposed_by_unit}:\n\"{proposed_question}\"\n"
+        f"{rationale_block}"
+        "Accept the proposed sub-question as a NEW question only if its difference from "
+        "the closest existing question is MATERIAL — that is, the proposed question would "
+        "elicit substantively different facts, target a different aspect of the primary "
+        "question, or apply a different theory. Differences in wording, level of generality, "
+        "or paraphrase alone are NOT material; in those cases, merge into the closest "
+        "existing question.\n\n"
+        "If you merge, cite the existing question's ID.\n\n"
+        "Respond with ONLY a JSON object in one of these exact forms:\n"
+        '{"verdict": "accept"}\n'
+        '{"verdict": "merge", "merge_question_id": "q001"}\n'
+    )
+
+    try:
+        result = query_json(client, [], prompt, logfile, max_tokens=300,
+                            config=config, task_name="qa.gate.question_close_match")
+    except Exception:
+        # Fail-conservative: merge with closest neighbor (avoid duplicate question).
+        return {"verdict": "merge", "merge_question_id": neighbors[0][1]["id"]}
+
+    if not isinstance(result, dict):
+        return {"verdict": "merge", "merge_question_id": neighbors[0][1]["id"]}
+
+    verdict = str(result.get("verdict", "merge")).strip().lower()
+    if verdict == "accept":
+        return {"verdict": "accept"}
+
+    out: Dict[str, Any] = {"verdict": "merge"}
+    qid = str(result.get("merge_question_id", "")).strip()
+    neighbor_ids = {q["id"] for _, q in neighbors}
+    if qid in neighbor_ids:
+        out["merge_question_id"] = qid
+    else:
+        out["merge_question_id"] = neighbors[0][1]["id"]
+    return out
+
+
+def _gate_question(
+    scratch_manager: "ScratchDocumentManager",
+    client,
+    config: Optional[Dict],
+    logfile: str,
+    primary_question: str,
+    proposed_question: str,
+    proposed_by_unit: str,
+    rationale: str = "",
+    close_match_client=None,
+) -> Dict[str, Any]:
+    """
+    Gate a proposed question (task qa.gate.question).
+
+    Returns one of:
+      {"verdict": "accept"}
+      {"verdict": "reject"}
+      {"verdict": "merge", "merge_question_id": "q001"}
+
+    Pre-gate similarity check (task 8.R8): if the proposed question has any
+    open-question neighbor at or above the question close-match threshold,
+    route to _gate_close_match_question (the specialized prompt that names the
+    neighbors). Otherwise fall through to the general gate prompt below.
+
+    The general gate prompt now leans on the rationale: a sub-question whose
+    rationale states only generic topical-relatedness (e.g., 'same legal area',
+    'might be relevant') is rejected.
+    """
+    # Cheap heuristic first: is it basically a restatement of the primary question?
+    if _is_near_duplicate_of_primary(proposed_question, primary_question):
+        return {"verdict": "reject"}
+
+    existing_open = [q for q in scratch_manager.questions if q["status"] == "open"]
+    has_facts = bool(scratch_manager.facts)
+
+    # No empty-context shortcut: even the first proposed sub-question must pass
+    # the rationale-specificity criterion. The general gate prompt handles the
+    # empty case gracefully (fact_block becomes empty; existing_lines == "(none)").
+
+    # Pre-gate similarity check against open questions. The close-match path's
+    # only job is the dedup decision. On `merge`, return immediately. On
+    # `accept` (= "materially distinct from named neighbors"), FALL THROUGH to
+    # the general gate so the proposed question is still subject to the
+    # rationale-specificity and primary-relevance criteria. Material
+    # distinctness from existing questions is necessary but not sufficient.
+    if existing_open:
+        from utils.config import (
+            get_question_gate_close_match_threshold,
+            get_question_gate_close_match_max_neighbors,
+        )
+        q_neighbors = _find_close_match_neighbors(
+            proposed_question,
+            existing_open,
+            threshold=get_question_gate_close_match_threshold(config),
+            max_neighbors=get_question_gate_close_match_max_neighbors(config),
+            content_key="text",
+        )
+        if q_neighbors:
+            top_sim, top_q = q_neighbors[0]
+            # Exact-text duplicate: auto-merge with no AI call.
+            if _texts_equivalent(proposed_question, top_q.get("text", "")):
+                return {"verdict": "merge", "merge_question_id": top_q["id"]}
+            cm_result = _gate_close_match_question(
+                close_match_client or client, config, logfile,
+                primary_question, proposed_question, proposed_by_unit, rationale,
+                q_neighbors,
+            )
+            if cm_result.get("verdict") == "merge":
+                return cm_result
+            # Else (accept): fall through to general gate below.
+
+    rationale_block = (
+        f"Analyst's rationale: \"{rationale}\"\n\n" if rationale else ""
+    )
+
+    fact_block = ""
+    if has_facts:
+        fact_pool_ctx = scratch_manager.get_fact_pool_context()
+        fact_block = f"{fact_pool_ctx}\n\n"
+
+    existing_lines = "\n".join(
+        f"[{q['id']}] {q['text']}" for q in existing_open
+    ) if existing_open else "(none)"
+
+    prompt = (
+        f"Primary question: {primary_question}\n\n"
+        f"{fact_block}"
+        f"Proposed question from {proposed_by_unit}:\n\"{proposed_question}\"\n"
+        f"{rationale_block}"
+        f"Open questions already in the research queue:\n{existing_lines}\n\n"
+        "Decide:\n"
+        "- 'accept': the question is specific, substantive, directly advances the primary "
+        "question, and is not already answered by the established facts above. The "
+        "analyst's rationale must describe a SPECIFIC way the sub-question's answer "
+        "would change or sharpen the answer to the primary question.\n"
+        "- 'reject': any of the following apply:\n"
+        "    * Restatement of the primary question, or merely a generalization/specialization "
+        "of it that would not extract additional information.\n"
+        "    * Too vague to drive useful fact extraction.\n"
+        "    * Substantially answered by the established facts above.\n"
+        "    * Already covered by an open question.\n"
+        "    * The rationale shows only GENERIC topical-relatedness — 'same legal area', "
+        "'might be relevant', 'related to attendance', 'could matter for X'. The rationale "
+        "must name a concrete mechanism by which the sub-question's answer would influence "
+        "the primary answer. If the rationale would apply equally to many unrelated "
+        "sub-questions about the same statute, it is too generic.\n"
+        "    * The likely answers would be enforcement remedies, procedural mechanics, or "
+        "rules about a different actor — i.e., content that wouldn't actually change the "
+        "primary answer even when fully answered.\n"
+        "- 'merge': substantially duplicates an existing open question (provide its ID).\n\n"
+        "Important: if the established facts already give a clear answer to the proposed "
+        "question, reject it — there is no value in researching a question the facts "
+        "already resolve.\n\n"
+        "Respond with ONLY JSON in one of these forms:\n"
+        '{"verdict": "accept"}\n'
+        '{"verdict": "reject"}\n'
+        '{"verdict": "merge", "merge_question_id": "q001"}\n'
+    )
+
+    try:
+        result = query_json(client, [], prompt, logfile, max_tokens=300,
+                            config=config, task_name="qa.gate.question")
+    except Exception:
+        return {"verdict": "accept"}
+
+    if not isinstance(result, dict):
+        return {"verdict": "accept"}
+
+    verdict = str(result.get("verdict", "accept")).strip().lower()
+    if verdict not in ("accept", "reject", "merge"):
+        verdict = "accept"
+
+    out: Dict[str, Any] = {"verdict": verdict}
+    if verdict == "merge":
+        qid = str(result.get("merge_question_id", "")).strip()
+        existing_ids = {q["id"] for q in scratch_manager.questions}
+        if qid and qid in existing_ids:
+            out["merge_question_id"] = qid
+        else:
+            out["verdict"] = "accept"
+
+    return out
+
+
+# Materiality-based section request gate (task 8.R7) — see WORKSTREAM_8_PLAN.md.
+# The gate sees the requested target's summary and a truncated excerpt of its
+# actual text, and decides against a high materiality bar rather than from the
+# requestor's justification alone. The excerpt cap is tunable via config.json
+# (processing.request_gate_text_excerpt_max_chars).
+
+
+def _resolve_section_request_target(
+    target_type: str,
+    target_number: str,
+    primary_parsed_content: Optional[Dict[str, Any]],
+    external_documents: Optional[Dict[str, Any]],
+    text_excerpt_max_chars: int,
+    primary_doc_label: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Resolve a section-request target to its summary + truncated text excerpt,
+    mirroring _enqueue_section_requests' resolution order exactly so the gate
+    judges the same target the enqueue will add.
+
+    Resolution order (mirrors enqueue):
+      1. Derive item_type_names from the PRIMARY doc's parameters table. (If the
+         primary doc has no operational type matching target_type, the request
+         cannot be enqueued at all, so the gate also gives up.)
+      2. Look up in the primary doc.
+      3. If not found, look up in self._external_documents in iteration order;
+         first hit wins.
+
+    The requesting unit's own doc is not searched separately: when the requester
+    is the primary, it is covered by step 2; when the requester is an external
+    unit, that doc is one of the entries in external_documents.
+
+    Returns {"summary", "text_excerpt", "source_doc_label", "found_label"} or None.
+    """
+    if not primary_parsed_content:
+        return None
+
+    # Step 1: derive item_type_names from primary's parameters (matches enqueue).
+    param_pointer = primary_parsed_content.get("document_information", {}).get("parameters", {})
+    item_type_name_found: Optional[str] = None
+    item_type_names: Optional[str] = None
+    for pd in param_pointer.values():
+        if not isinstance(pd, dict):
+            continue
+        if not (pd.get("operational") == 1 and pd.get("name")):
+            continue
+        if pd["name"].lower() == target_type.lower():
+            item_type_name_found = pd["name"]
+            item_type_names = pd.get("name_plural", "")
+            break
+
+    if not item_type_names:
+        return None
+
+    # Step 2 & 3: primary first, then externals.
+    working_item = lookup_item(primary_parsed_content, item_type_names, target_number)
+    source_doc_label: Optional[str] = primary_doc_label if working_item is not None else None
+    if working_item is None and external_documents:
+        for ext_file, ext_doc in external_documents.items():
+            wi = lookup_item(ext_doc, item_type_names, target_number)
+            if wi is not None:
+                working_item = wi
+                source_doc_label = os.path.basename(ext_file).replace("_processed.json", "")
+                break
+
+    if working_item is None:
+        return None
+
+    name_found = item_type_name_found or target_type
+    summary = (
+        working_item.get("summary_2")
+        or working_item.get("summary_1")
+        or working_item.get("unit_title")
+        or ""
+    )
+    text = working_item.get("text") or ""
+    if len(text) > text_excerpt_max_chars:
+        text_excerpt = text[:text_excerpt_max_chars] + "\n[... truncated ...]"
+    else:
+        text_excerpt = text
+
+    return {
+        "summary": summary.strip() if isinstance(summary, str) else "",
+        "text_excerpt": text_excerpt,
+        "source_doc_label": source_doc_label,
+        "found_label": f"{name_found.capitalize()} {target_number}",
+    }
+
+
+def _gate_section_request(
+    scratch_manager: "ScratchDocumentManager",
+    client,
+    config: Optional[Dict],
+    logfile: str,
+    primary_question: str,
+    target_type: str,
+    target_number: str,
+    reason: str,
+    proposed_by_unit: str,
+    primary_parsed_content: Optional[Dict[str, Any]] = None,
+    external_documents: Optional[Dict[str, Any]] = None,
+    primary_doc_label: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Materiality gate for a proposed section/unit request (task qa.gate.request_materiality).
+
+    Looks up the requested target's summary and text excerpt, then decides
+    against a high materiality bar: accept only if the section's actual
+    content is reasonably likely to change the final answer.
+
+    Returns: {"verdict": "accept"} or {"verdict": "reject"}.
+    """
+    from utils.config import get_request_gate_text_excerpt_max_chars
+    target_info = _resolve_section_request_target(
+        target_type, target_number,
+        primary_parsed_content=primary_parsed_content,
+        external_documents=external_documents,
+        text_excerpt_max_chars=get_request_gate_text_excerpt_max_chars(config),
+        primary_doc_label=primary_doc_label,
+    )
+
+    if target_info is None:
+        # Cannot find the requested target → can't judge materiality → reject.
+        return {"verdict": "reject"}
+
+    summary_block = target_info["summary"] or "(no summary available)"
+    excerpt_block = target_info["text_excerpt"] or "(no text available)"
+    external_clause = ""
+    if target_info["source_doc_label"]:
+        external_clause = f" (in external document {target_info['source_doc_label']})"
+
+    prompt = (
+        f"Primary question: {primary_question}\n\n"
+        f"An analyst working on {proposed_by_unit} is requesting that "
+        f"{target_info['found_label']}{external_clause} be added to the analysis pool.\n\n"
+        f"Analyst's stated justification: {reason or '(no reason provided)'}\n\n"
+        f"Summary of {target_info['found_label']}:\n{summary_block}\n\n"
+        f"Text of {target_info['found_label']}:\n{excerpt_block}\n\n"
+        "Decide whether to add this section to the analysis pool. The bar is HIGH: accept "
+        "only if, after reviewing the section's actual content above, the section contains "
+        "specific material reasonably likely to CHANGE the final answer to the primary "
+        "question — not merely that it is topically related to the same legal area.\n\n"
+        "REJECT if any of the following apply:\n"
+        "- The section discusses the same general topic but does not address the specific "
+        "matter the primary question asks about.\n"
+        "- The analyst's justification depends on an inferential chain not supported by the "
+        "section's actual content.\n"
+        "- The section is procedural, structural, or definitional in a way that would not "
+        "alter the answer.\n"
+        "- The section's substantive content is already captured by existing material "
+        "available to the analysis.\n\n"
+        "ACCEPT only when you can name a specific rule, exception, definition, or condition "
+        "in the section's actual text that bears on the primary question. Provide that "
+        "anchor in the rationale field.\n\n"
+        "Respond with ONLY JSON in one of these forms:\n"
+        '{"verdict": "accept", "rationale": "Brief, content-anchored reason."}\n'
+        '{"verdict": "reject"}\n'
+    )
+
+    try:
+        result = query_json(client, [], prompt, logfile, max_tokens=400,
+                            config=config, task_name="qa.gate.request_materiality")
+    except Exception:
+        # Fail-conservative: reject on error to protect against runaway re-analysis.
+        return {"verdict": "reject"}
+
+    if not isinstance(result, dict):
+        return {"verdict": "reject"}
+
+    verdict = str(result.get("verdict", "reject")).strip().lower()
+    if verdict not in ("accept", "reject"):
+        verdict = "reject"
+    return {"verdict": verdict}
+
+
+def _is_near_duplicate_of_primary(proposed: str, primary: str) -> bool:
+    """Heuristic: is the proposed question essentially the primary question?"""
+    p = proposed.lower().strip().rstrip("?").strip()
+    q = primary.lower().strip().rstrip("?").strip()
+    if p in q or q in p:
+        return True
+    if len(p) > 20 and len(q) > 20:
+        words_p = set(p.split())
+        words_q = set(q.split())
+        overlap = len(words_p & words_q) / max(len(words_p), len(words_q), 1)
+        return overlap > 0.75
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -742,25 +1441,13 @@ class ContextBuilder:
         scratch: Dict[str, Any],
     ) -> Dict[Tuple[str, str], str]:
         """
-        Examine scratch['requests'] and determine which units have requested
-        additional detail (e.g., summary_2).
-        Returns a mapping (type_lower, number) -> detail_level.
+        Return a mapping (type_lower, number) -> detail_level for requested summaries.
+
+        In WS8, requests are consumed inline and never stored in scratch, so this
+        always returns an empty dict.  The method is retained to avoid breaking
+        callers inside build_cache_components_for_item.
         """
-        detail_map: Dict[Tuple[str, str], str] = {}
-        for req in scratch.get("requests", {}).values():
-            if not isinstance(req, dict):
-                continue
-            if req.get("action") != "request_detail":
-                continue
-            t = str(req.get("target_type", "")).strip()
-            n = str(req.get("target_number", "")).strip()
-            level = str(req.get("detail_level", "")).strip() or "summary_2"
-            if not t or not n:
-                continue
-            key = (t.lower(), n)
-            # Store the requested detail level (currently only summary_2 is supported)
-            detail_map[key] = level
-        return detail_map
+        return {}
 
     def build_cache_components_for_item(
         self,
@@ -1148,6 +1835,7 @@ class ChunkAnalyzer:
         question_object: Dict[str, Any],
         parsed_content: Dict[str, Any],
         scratch_snapshot: Dict[str, Any],
+        config: Dict[str, Any] = None,
     ):
         self.client = client
         self.logfile = logfile
@@ -1156,6 +1844,7 @@ class ChunkAnalyzer:
         self.question_object = question_object
         self.parsed_content = parsed_content
         self.scratch_snapshot = scratch_snapshot
+        self._config = config or {}
 
     def _build_chunk_prompt(
         self,
@@ -1311,150 +2000,348 @@ class ChunkAnalyzer:
         query_prompt = "".join(prompt)
         return full_cache, query_prompt
 
-    def analyze_chunks(
+    # ------------------------------------------------------------------
+    # WS8 Phase-specific prompt builders
+    # ------------------------------------------------------------------
+
+    def _build_phase1_prompt(
+        self,
+        unit_context: str,
+        chunk_text_str: str,
+        item_type_name: str,
+        item_number: str,
+        unit_title: str,
+        chunk_idx: int,
+        n_chunks: int,
+        prior_facts: List[str],
+        sub_question: Optional[str] = None,
+        circleback_context: Optional[str] = None,
+    ) -> Tuple[List[str], str]:
+        """Cache + query prompt for Phase 1 (fact extraction).
+
+        When sub_question is provided (Phase 3 calls), it replaces the main question.
+        When circleback_context is provided, the analyst is told about responsive facts
+        that were found for a question they proposed, so they can extract follow-up facts.
+        The analyst never sees the shared fact pool or other analysts' outputs.
+        """
+        item_label = f"{item_type_name.capitalize()} {item_number}"
+        if unit_title:
+            item_label += f": {unit_title}"
+
+        question_text = sub_question if sub_question else self.context_builder.question_text
+
+        if circleback_context:
+            role = (
+                "You are a legal analyst performing fact extraction from a portion of a legal document.\n\n"
+                "A sub-question you previously proposed has been answered by other sections. "
+                "The answered question and the facts found in response are shown below. "
+                "Your task: given this new information, extract any additional facts from YOUR PORTION "
+                "that are now relevant to the primary question. Focus on facts your unit contributes "
+                "that connect to or build on the answered sub-question.\n\n"
+            )
+        else:
+            role = (
+                "You are a legal analyst performing fact extraction from a portion of a legal document.\n\n"
+                "Your sole task is to identify facts from YOUR PORTION that directly help answer "
+                "the question below. Include specific rules, thresholds, definitions, "
+                "requirements, and exceptions. Omit tangential information.\n\n"
+            )
+        question_block = f"Primary question:\n{question_text}\n\n"
+        schema_block = (
+            'Respond with a JSON object:\n'
+            '{"facts": ["...", "..."], "section_requests": [{"type": "Section", "number": "201", "reason": "..."}]}\n\n'
+            "Each fact must be:\n"
+            "- A complete, self-contained statement\n"
+            "- Directly relevant to the question\n"
+            "- Grounded solely in YOUR PORTION below — report what the text states, "
+            "not your reasoning about why it may be relevant\n"
+            "- Specific: include actual thresholds, numbers, or rule text when present\n"
+            "Do not add parenthetical commentary, bridge reasoning, or characterizations "
+            "asserting relevance that is not explicit in the source text. If a provision's "
+            "connection to the question is not stated in the text itself, omit it rather "
+            "than constructing the link.\n\n"
+            "section_requests: specific units whose actual content is needed to answer the question "
+            "but is not present in your portion. Only request a unit when knowing its content "
+            "is necessary — not merely because your portion mentions it. Include a concrete reason.\n"
+            'If you find no relevant facts and have no requests, respond: {"facts": [], "section_requests": []}\n\n'
+        )
+
+        cache_parts = [role, question_block, schema_block]
+
+        prompt: List[str] = []
+
+        if unit_context:
+            prompt.append(unit_context)
+
+        if circleback_context:
+            prompt.append(circleback_context)
+            prompt.append("\n")
+
+        if n_chunks > 1:
+            prompt.append(
+                f"NOTE: {item_label} is a long unit divided into {n_chunks} portions. "
+                f"You are examining portion {chunk_idx + 1} of {n_chunks}.\n\n"
+            )
+
+        if prior_facts:
+            prompt.append(
+                "Facts already identified in earlier portions of this unit "
+                "(do NOT re-extract):\n"
+            )
+            for pf in prior_facts:
+                prompt.append(f"- {pf}\n")
+            prompt.append("\n")
+
+        prompt.append("=" * 70 + "\n")
+        prompt.append("YOUR PORTION TO ANALYZE\n")
+        prompt.append("=" * 70 + "\n")
+        prompt.append(f"{item_label}:\n\n")
+        prompt.append(chunk_text_str.strip() + "\n")
+        prompt.append("=" * 70 + "\n\n")
+        prompt.append("Respond with the JSON object listing extracted facts.\n")
+
+        return cache_parts, "".join(prompt)
+
+    def _build_phase2_prompt(
+        self,
+        unit_context: str,
+        item_type_name: str,
+        item_number: str,
+        unit_title: str,
+        unit_summary: str,
+    ) -> Tuple[List[str], str]:
+        """Cache + query prompt for Phase 2 (question/request generation).
+
+        The analyst sees only their unit text and the primary question — never the
+        shared fact pool or existing question list. Deduplication is the question
+        gatekeeper's responsibility, not the analyst's.
+        """
+        unit_label = f"{item_type_name.capitalize()} {item_number}"
+        if unit_title:
+            unit_label += f": {unit_title}"
+
+        role = (
+            "You are a legal analyst identifying research gaps after reviewing a portion of a legal document.\n\n"
+            "Based solely on the content of YOUR PORTION, you may propose:\n"
+            "1. Substantive sub-questions about what the document requires, permits, or says — "
+            "questions whose answers would come from other sections you have not seen.\n"
+            "2. Section requests: specific units whose actual content is needed to answer "
+            "the primary question but is not present in your portion.\n\n"
+        )
+        question_block = (
+            f"Primary Question:\n{self.context_builder.question_text}\n\n"
+        )
+        schema_block = (
+            'Respond with a JSON object:\n'
+            '{"questions": [{"text": "...", "rationale": "..."}], '
+            '"requests": [{"type": "Section", "number": "201", "reason": "..."}]}\n\n'
+            "Rules for sub-questions:\n"
+            "- Ask about substance, not location. Frame questions as 'What does the document require for X?' "
+            "or 'What restrictions apply to Y?' — NOT 'Which section covers X?' or 'Is there a section that...'.\n"
+            "- Each sub-question must be something another section is specifically likely to answer.\n"
+            "- Do NOT propose questions that restate or paraphrase the primary question.\n"
+            "- Do NOT ask questions already answered by your own unit's content.\n"
+            "- rationale: explain in one sentence why the answer to this sub-question would help answer "
+            "the primary question — what the implication of a positive or negative answer would be.\n"
+            "Section request rules:\n"
+            "- Include a concrete reason tied to the primary question.\n"
+            'If nothing to propose: {"questions": [], "requests": []}\n\n'
+        )
+
+        cache_parts = [role, question_block, schema_block]
+
+        prompt: List[str] = []
+
+        if unit_context:
+            prompt.append(unit_context)
+
+        prompt.append(f"Your unit: {unit_label}\n")
+        if unit_summary:
+            prompt.append(f"Summary: {unit_summary}\n")
+        prompt.append(
+            "\nBased on the content of your portion, what sub-questions or section requests "
+            "would help answer the primary question?\n"
+        )
+
+        return cache_parts, "".join(prompt)
+
+    # ------------------------------------------------------------------
+    # WS8 Phase-specific analyze methods
+    # ------------------------------------------------------------------
+
+    def analyze_phase1(
         self,
         working_item: Dict[str, Any],
         item_type_name: str,
         item_number: str,
-        refine: bool,
         score_level: int = 2,
-    ) -> Tuple[bool, bool, List[str], List[str]]:
+        sub_question: Optional[str] = None,
+        circleback_context: Optional[str] = None,
+    ) -> Tuple[List[str], List[Dict[str, Any]]]:
         """
-        Analyze the item's text in chunks.
-        
-        Returns:
-            Tuple[bool, bool, List[str], List[str]]: (changed, had_actions, question_ids_added, question_ids_answered)
-            - changed: True if the scratch document was updated
-            - had_actions: True if any non-empty actions were returned
-            - question_ids_added: List of question IDs that were added
-            - question_ids_answered: List of question IDs that were answered
+        Phase 1 (and Phase 3): extract proposed facts and section requests from this unit's chunks.
+
+        When sub_question is provided, it replaces the main question in the prompt —
+        this is how Phase 3 (targeted sub-question analysis) is implemented.
+        When circleback_context is provided, the analyst is shown responsive facts for a
+        question they proposed and asked to extract additional facts in light of them.
+        Returns (proposed_facts, proposed_section_requests). Neither list is gated;
+        the caller is responsible for gating before acting on results.
         """
         text = working_item.get("text", "")
         if not text:
-            # Check whether this is a data-table sub-unit (data_table: 1 flag in parameters).
-            # These sub-units have text="" but summary_1 set by Stage 3.  Use the summary so
-            # the analyst produces a pointer-style response rather than receiving an empty prompt.
-            _params = self.parsed_content.get('document_information', {}).get('parameters', {})
-            _is_data_table = any(p.get('name') == item_type_name and p.get('data_table') and p.get('is_sub_unit')
-                                 for p in _params.values())
+            _params = self.parsed_content.get("document_information", {}).get("parameters", {})
+            _is_data_table = any(
+                p.get("name") == item_type_name and p.get("data_table") and p.get("is_sub_unit")
+                for p in _params.values()
+            )
             if _is_data_table:
                 text = working_item.get("summary_1", "")
+
+        if not text:
+            return [], []
+
         breakpoints = working_item.get("breakpoints", [])
+        chunks = list(chunk_text(text, breakpoints, preferred_length=15000))
+        if not chunks:
+            return [], []
 
-        # Get plural form of item type for duplicate checking
-        item_type_names = None
-        content_pointer = None
-        if 'document_information' in self.parsed_content and 'parameters' in self.parsed_content['document_information']:
-            param_pointer = self.parsed_content['document_information']['parameters']
-            for item_type_key, params in param_pointer.items():
-                if params.get('name') == item_type_name:
-                    item_type_names = params.get('name_plural')
-                    break
-        if 'content' in self.parsed_content:
-            content_pointer = self.parsed_content['content']
-
-        # Build metadata suffix for sections in duplicate sets
-        metadata_suffix = build_metadata_suffix(item_number, working_item, content_pointer, item_type_names)
-
-        # Build cache components once per item.
-        # Returns: (static_cache, unit_context)
-        static_cache, unit_context = self.context_builder.build_cache_components_for_item(
-            working_item,
-            item_type_name,
-            item_number,
-            self.question_object.get("scratch", {}),
+        # Build unit context (definitions, summaries) — static per unit
+        _, unit_context = self.context_builder.build_cache_components_for_item(
+            working_item, item_type_name, item_number,
+            self.scratch_manager.scratch,
             score_level=score_level,
-            scratch_snapshot=self.scratch_snapshot,
         )
 
-        chunks = list(chunk_text(text, breakpoints, preferred_length=15000))
-        n_chunks = len(chunks)
-        if not chunks:
-            return False, False
+        # Metadata suffix for duplicate sections
+        _params = self.parsed_content.get("document_information", {}).get("parameters", {})
+        _item_type_names = None
+        for _pk, _pd in _params.items():
+            if isinstance(_pd, dict) and _pd.get("name") == item_type_name:
+                _item_type_names = _pd.get("name_plural")
+                break
+        _content = self.parsed_content.get("content")
+        metadata_suffix = build_metadata_suffix(item_number, working_item, _content, _item_type_names)
 
-        changed_any = False
-        had_actions_any = False
-        question_ids_added = []
-        question_ids_answered = []
-        prev_summary = None  # We could synthesize or reuse summaries in future.
-
-        # Track facts and questions added by earlier chunks of this item (for later chunks)
-        prior_chunk_additions: Dict[str, Any] = {"fact": {}, "question": {}}
+        all_proposed_facts: List[str] = []
+        all_proposed_requests: List[Dict[str, Any]] = []
+        prior_facts: List[str] = []
+        unit_title = working_item.get("unit_title", "")
 
         for idx, chunk in enumerate(chunks):
-            # Augment chunk with metadata (for _dup sections)
-            augmented_chunk = augment_chunk_with_metadata(chunk, metadata_suffix)
-
-            cache_prompt_list, query_prompt = self._build_chunk_prompt(
-                static_cache,
+            augmented = augment_chunk_with_metadata(chunk, metadata_suffix)
+            cache_parts, query_prompt = self._build_phase1_prompt(
                 unit_context,
-                augmented_chunk,  # Use augmented chunk instead of plain chunk
-                prev_summary,
+                augmented,
                 item_type_name,
                 item_number,
-                refine,
-                unit_title=working_item.get("unit_title", ""),
+                unit_title,
                 chunk_idx=idx,
-                n_chunks=n_chunks,
-                prior_chunk_additions=prior_chunk_additions,
+                n_chunks=len(chunks),
+                prior_facts=prior_facts,
+                sub_question=sub_question,
+                circleback_context=circleback_context,
             )
 
-            # Snapshot keys before apply_actions to detect new additions
-            if n_chunks > 1:
-                facts_before = set(self.scratch_manager.scratch.get("fact", {}).keys())
-                questions_before = set(self.scratch_manager.scratch.get("question", {}).keys())
-
-            # For now, rely on API-level caching; we do our own high-level
-            # grouping in QueryWithBaseClient.
             try:
-                result_obj = query_json(self.client, cache_prompt_list, query_prompt, self.logfile,
-                                        max_tokens=16000)
-            except ModelError as e:
-                raise ModelError(
-                    f"ChunkAnalyzer: invalid JSON response for {item_type_name} "
-                    f"{item_number}, chunk {idx+1}: {e}"
+                result_obj = query_json(
+                    self.client, cache_parts, query_prompt, self.logfile,
+                    max_tokens=8000, config=self._config,
+                    task_name="qa.analysis.phase1",
                 )
+            except ModelError:
+                continue
 
-            # Expect top-level {"actions": [...]} but be forgiving.
-            actions = []
-            if isinstance(result_obj, dict):
-                if "actions" in result_obj and isinstance(result_obj["actions"], list):
-                    actions = result_obj["actions"]
-                else:
-                    # Single action object
-                    actions = [result_obj]
-            elif isinstance(result_obj, list):
-                actions = result_obj
+            if not isinstance(result_obj, dict):
+                continue
 
-            # Check if we had any non-empty actions
-            if actions and len(actions) > 0:
-                had_actions_any = True
+            chunk_facts = [str(f).strip() for f in result_obj.get("facts", []) if f]
+            all_proposed_facts.extend(chunk_facts)
+            prior_facts.extend(chunk_facts)
 
-            changed, q_ids_added, q_ids_answered = self.scratch_manager.apply_actions(
-                item_type_name, item_number, actions
+            chunk_requests = [
+                r for r in result_obj.get("section_requests", [])
+                if isinstance(r, dict) and r.get("type") and r.get("number")
+            ]
+            all_proposed_requests.extend(chunk_requests)
+
+        return all_proposed_facts, all_proposed_requests
+
+    def analyze_phase2(
+        self,
+        working_item: Dict[str, Any],
+        item_type_name: str,
+        item_number: str,
+    ) -> Tuple[List[Tuple[str, str]], List[Dict[str, Any]]]:
+        """
+        Phase 2: propose questions and section requests for this unit.
+        Returns (proposed_questions, proposed_requests) where each proposed question
+        is a (text, rationale) tuple.
+
+        The analyst sees only their unit and the primary question — not the fact pool
+        or existing question list. Deduplication is the question gatekeeper's job.
+        """
+        _, unit_context = self.context_builder.build_cache_components_for_item(
+            working_item, item_type_name, item_number,
+            self.scratch_manager.scratch,
+            score_level=2,
+        )
+
+        unit_summary = working_item.get("summary_1", "")
+        unit_title = working_item.get("unit_title", "")
+
+        cache_parts, query_prompt = self._build_phase2_prompt(
+            unit_context, item_type_name, item_number, unit_title, unit_summary,
+        )
+
+        try:
+            result_obj = query_json(
+                self.client, cache_parts, query_prompt, self.logfile, max_tokens=4000,
+                config=self._config, task_name="qa.analysis.phase2",
             )
-            if changed:
-                changed_any = True
-                question_ids_added.extend(q_ids_added)
-                question_ids_answered.extend(q_ids_answered)
+        except ModelError:
+            return [], []
 
-            # Track newly added facts and questions for subsequent chunks
-            if n_chunks > 1:
-                new_fact_ids = sorted(set(self.scratch_manager.scratch.get("fact", {}).keys()) - facts_before)
-                for fid in new_fact_ids:
-                    prior_chunk_additions["fact"][fid] = self.scratch_manager.scratch["fact"][fid]
-                new_question_ids = sorted(
-                    set(self.scratch_manager.scratch.get("question", {}).keys()) - questions_before
-                )
-                for qid in new_question_ids:
-                    prior_chunk_additions["question"][qid] = self.scratch_manager.scratch["question"][qid]
+        if not isinstance(result_obj, dict):
+            return [], []
 
-        return changed_any, had_actions_any, question_ids_added, question_ids_answered
+        raw_questions = result_obj.get("questions", [])
+        questions: List[Tuple[str, str]] = []
+        for q in raw_questions:
+            if isinstance(q, dict):
+                text = str(q.get("text", "")).strip()
+                rationale = str(q.get("rationale", "")).strip()
+            else:
+                text = str(q).strip()
+                rationale = ""
+            if text:
+                questions.append((text, rationale))
+
+        requests = [r for r in result_obj.get("requests", []) if isinstance(r, dict)]
+        return questions, requests
+
+    # ------------------------------------------------------------------
+    # Retired: analyze_chunks (WS8 replacement — do not call)
+    # ------------------------------------------------------------------
+
+    def analyze_chunks(
+        self,
+        working_item,
+        item_type_name,
+        item_number,
+        refine,
+        score_level=2,
+    ):
+        """Retired (WS8). Use analyze_phase1/2/3 via make_chunk_analyzer() instead."""
+        raise NotImplementedError("analyze_chunks is retired in WS8")
 
 
 class ItemAnalyzer:
     """
-    Analyze a single operational item, delegating to ChunkAnalyzer when needed.
+    Build a ChunkAnalyzer for a single unit.
+
+    analyze_item() is retired in WS8. Use make_chunk_analyzer() instead and call
+    analyze_phase1 (Phase 1 and Phase 3 via sub_question param) or analyze_phase2.
     """
 
     def __init__(
@@ -1463,7 +2350,7 @@ class ItemAnalyzer:
         logfile: str,
         parsed_content: Dict[str, Any],
         question_object: Dict[str, Any],
-        scratch_snapshot: Dict[str, Any],
+        scratch_manager: ScratchDocumentManager,
         external_doc_label: Optional[str] = None,
         parent_parsed_content: Optional[Dict[str, Any]] = None,
     ):
@@ -1471,53 +2358,26 @@ class ItemAnalyzer:
         self.logfile = logfile
         self.parsed_content = parsed_content
         self.question_object = question_object
-        self.scratch_snapshot = scratch_snapshot
+        self.scratch_manager = scratch_manager
         self.external_doc_label = external_doc_label
         self.parent_parsed_content = parent_parsed_content
 
-    def analyze_item(
-        self,
-        item_type_name: str,
-        item_type_name_plural: str,
-        item_number: str,
-        working_item: Dict[str, Any],
-        question_text: str,
-        refine: bool,
-        score_level: int = 2,
-    ) -> Tuple[bool, bool, List[str], List[str]]:
-        """
-        Analyze a single item.
-        
-        Returns:
-            Tuple[bool, bool, List[str], List[str]]: (changed, had_actions, question_ids_added, question_ids_answered)
-            - changed: True if scratch was updated
-            - had_actions: True if any non-empty actions were returned
-            - question_ids_added: List of question IDs that were added
-            - question_ids_answered: List of question IDs that were answered
-        """
-        scratch_manager = ScratchDocumentManager(self.question_object,
-                                                   source_doc_label=self.external_doc_label)
-        context_builder = ContextBuilder(self.parsed_content, question_text,
-                                         external_doc_label=self.external_doc_label,
-                                         parent_parsed_content=self.parent_parsed_content)
-        chunk_analyzer = ChunkAnalyzer(
+    def make_chunk_analyzer(self, question_text: str) -> "ChunkAnalyzer":
+        """Return a ChunkAnalyzer instance wired to this unit's document and scratch."""
+        context_builder = ContextBuilder(
+            self.parsed_content, question_text,
+            external_doc_label=self.external_doc_label,
+            parent_parsed_content=self.parent_parsed_content,
+        )
+        return ChunkAnalyzer(
             self.client,
             self.logfile,
             context_builder,
-            scratch_manager,
+            self.scratch_manager,
             self.question_object,
             self.parsed_content,
-            self.scratch_snapshot,
-        )
-
-        # Currently, we always route through ChunkAnalyzer; it will treat
-        # single-chunk items as a trivial case.
-        return chunk_analyzer.analyze_chunks(
-            working_item,
-            item_type_name,
-            item_number,
-            refine,
-            score_level=score_level,
+            {},  # scratch_snapshot unused in WS8 phase methods
+            config=self._config,
         )
 
 
@@ -1594,10 +2454,6 @@ class QuestionProcessor:
         if "working_answer" not in self.question_object:
             self.question_object["working_answer"] = {"text": ""}
 
-        # Initialize skip list for optimization (units that can be skipped)
-        if "skip_list" not in self.question_object:
-            self.question_object["skip_list"] = []
-        
         # Initialize progress tracking for idempotency
         if "progress" not in self.question_object:
             self.question_object["progress"] = {
@@ -1633,11 +2489,6 @@ class QuestionProcessor:
         except Exception:
             self._item_level_refs = []
             self._parent_parsed_content = None
-
-        # Tracks fact IDs that have been through at least one compaction in the current
-        # run_analysis_iteration call. Used by _detect_implicit_references(pending_only=True)
-        # to restrict scanning to facts added since the last compaction.
-        self._compacted_fact_ids: set = set()
 
     # Convenience
     @property
@@ -1766,64 +2617,8 @@ class QuestionProcessor:
         return None
 
     def _refresh_cross_document_units(self) -> int:
-        """
-        Scan cross-doc units that were analyzed this round for their own External
-        need_ref entries, check the registry for item-level resolution, and queue
-        any newly discovered cross-doc units. Returns count of newly added units.
-        """
-        added = 0
-        cds = self.question_object.get("cross_doc_scores", {})
-
-        for ext_file, ext_scores in list(cds.items()):
-            ext_doc = self._load_external_document(ext_file)
-            if ext_doc is None:
-                continue
-
-            for item_type_name, type_scores in ext_scores.items():
-                try:
-                    _, type_plural = canonical_org_types(item_type_name.lower())
-                except Exception:
-                    type_plural = item_type_name + 's'
-
-                for item_num in list(type_scores.keys()):
-                    unit = lookup_item(ext_doc, type_plural, item_num)
-                    if unit is None:
-                        continue
-
-                    for ref_entry in unit.get("need_ref", []):
-                        if not isinstance(ref_entry, dict):
-                            continue
-                        if ref_entry.get("type") != "External":
-                            continue
-                        ref_text = ref_entry.get("value", "")
-
-                        tgt = self._find_registry_target_for_ref(
-                            ext_file, item_type_name, item_num, ref_text
-                        )
-                        if tgt is None:
-                            continue
-
-                        tgt_file = tgt['target_file_path']
-                        tgt_type = tgt['target_item_type']
-                        tgt_num = tgt['target_item_number']
-
-                        ext2 = self._load_external_document(tgt_file)
-                        if ext2 is None:
-                            continue
-
-                        if self._add_cross_doc_unit(tgt_file, tgt_type, tgt_num):
-                            added += 1
-                            ext2_name = os.path.basename(tgt_file).replace('_processed.json', '')
-                            print(f"  Cross-doc (recursive): queued {tgt_type} {tgt_num} "
-                                  f"from {ext2_name}")
-
-        if added:
-            self._save_question_object()
-        return added
-
-    # ------------------------------------------------------------------
-    # Client selection helpers
-    # ------------------------------------------------------------------
+        """Retired (WS8). Cross-doc units are added via gatekeeper-approved section requests."""
+        raise NotImplementedError("_refresh_cross_document_units is retired in WS8")
 
     def _get_client_for_phase(self, phase: str):
         """
@@ -1847,9 +2642,17 @@ class QuestionProcessor:
         # Map phase names to task names
         phase_to_task = {
             'relevance_scoring': 'qa.relevance.score',
-            'iterative_analysis': 'qa.analysis.analyze_chunk',
+            'iterative_analysis': 'qa.analysis.analyze_chunk',  # retired; kept for fallback
+            'ws8_phase1': 'qa.analysis.phase1',
+            'ws8_phase2': 'qa.analysis.phase2',
+            'ws8_phase3': 'qa.analysis.answer_question',
+            'ws8_gate': 'qa.gate.fact',
+            'ws8_fact_close_match_gate': 'qa.gate.fact_close_match',
+            'ws8_question_gate': 'qa.gate.question',
+            'ws8_question_close_match_gate': 'qa.gate.question_close_match',
+            'ws8_request_gate': 'qa.gate.request_materiality',
             'cleanup': 'qa.synthesis.cleanup_scratch',
-            'final_answer': 'qa.synthesis.final_answer'
+            'final_answer': 'qa.synthesis.final_answer',
         }
 
         task_name = phase_to_task.get(phase, 'qa.relevance.score')
@@ -1877,58 +2680,21 @@ class QuestionProcessor:
         """
         phase_to_task = {
             'relevance_scoring': 'qa.relevance.score',
-            'iterative_analysis': 'qa.analysis.analyze_chunk',
+            'iterative_analysis': 'qa.analysis.analyze_chunk',  # retired; kept for fallback
+            'ws8_phase1': 'qa.analysis.phase1',
+            'ws8_phase2': 'qa.analysis.phase2',
+            'ws8_phase3': 'qa.analysis.answer_question',
+            'ws8_gate': 'qa.gate.fact',
+            'ws8_fact_close_match_gate': 'qa.gate.fact_close_match',
+            'ws8_question_gate': 'qa.gate.question',
+            'ws8_question_close_match_gate': 'qa.gate.question_close_match',
+            'ws8_request_gate': 'qa.gate.request_materiality',
             'cleanup': 'qa.synthesis.cleanup_scratch',
-            'final_answer': 'qa.synthesis.final_answer'
+            'final_answer': 'qa.synthesis.final_answer',
         }
         return phase_to_task.get(phase, 'qa.relevance.score')
 
     # ------------------------------------------------------------------
-    # Skip optimization helpers
-    # ------------------------------------------------------------------
-
-    def _get_unit_key(self, item_type_name: str, item_number: str) -> str:
-        """Generate a unique key for a unit."""
-        return f"{item_type_name.lower()}_{item_number}"
-
-    def _should_skip_unit(
-        self, item_type_name: str, item_number: str, refine: bool
-    ) -> bool:
-        """
-        Check if this unit should be skipped.
-        
-        Skip if:
-        - This is a refinement pass (refine=True)
-        - The unit is on the skip list
-        """
-        if not refine:
-            # Never skip on initial pass
-            return False
-        
-        unit_key = self._get_unit_key(item_type_name, item_number)
-        skip_list = self.question_object.get("skip_list", [])
-        return unit_key in skip_list
-
-    def _add_to_skip_list(self, item_type_name: str, item_number: str) -> None:
-        """Add a unit to the skip list."""
-        unit_key = self._get_unit_key(item_type_name, item_number)
-        skip_list = self.question_object.get("skip_list", [])
-        if unit_key not in skip_list:
-            skip_list.append(unit_key)
-            self.question_object["skip_list"] = skip_list
-
-    def _clear_skip_list(self) -> None:
-        """Clear the entire skip list (called when new question is added)."""
-        self.question_object["skip_list"] = []
-
-    def _remove_from_skip_list(self, item_type_name: str, item_number: str) -> None:
-        """Remove a unit from the skip list."""
-        unit_key = self._get_unit_key(item_type_name, item_number)
-        skip_list = self.question_object.get("skip_list", [])
-        if unit_key in skip_list:
-            skip_list.remove(unit_key)
-            self.question_object["skip_list"] = skip_list
-
     # ------------------------------------------------------------------
     # Scoring phase
     # ------------------------------------------------------------------
@@ -2066,10 +2832,16 @@ class QuestionProcessor:
         prompt.append(
             "IMPORTANT: You MUST respond with a single digit enclosed in square brackets.\n\n"
             "Your response must be one of these four options:\n"
-            "[0] if the portion appears NOT relevant to answering the question\n"
-            "[1] if the portion has a LOW probability of being relevant\n"
-            "[2] if the portion is LIKELY relevant\n"
-            "[3] if the portion is CLEARLY IMPORTANT for answering the question\n\n"
+            "[0] if the portion clearly addresses a different subject and is NOT relevant\n"
+            "[1] if there is a LOW probability of relevance — any connection to the question "
+            "is indirect and would require several inferential steps to establish\n"
+            "[2] if the portion is LIKELY relevant — it plausibly addresses the question "
+            "subject, though the connection may not be explicit in the summary\n"
+            "[3] if the portion is CLEARLY IMPORTANT — the summary explicitly addresses "
+            "the specific subject of the question, not merely a related domain\n\n"
+            "Base your score on what the summary explicitly states. Do not assign a high "
+            "score because you can imagine a possible connection; assign [3] only when "
+            "the summary itself makes the relevance apparent.\n\n"
             "Respond now with only the single digit enclosed in square brackets (e.g., [0], [1], [2], or [3]). "
             "Do not include any explanation, reasoning, or other text.\n"
         )
@@ -2160,10 +2932,16 @@ class QuestionProcessor:
             "I will provide numbered summaries of portions of a legal document "
             "and a question. For each numbered summary, assign a relevance score.\n\n"
             "Score scale:\n"
-            "0 = NOT relevant to answering the question\n"
-            "1 = LOW probability of being relevant\n"
-            "2 = LIKELY relevant\n"
-            "3 = CLEARLY IMPORTANT for answering the question\n\n"
+            "0 = NOT relevant — the summary clearly addresses a different subject\n"
+            "1 = LOW probability — any connection to the question is indirect and "
+            "would require several inferential steps to establish\n"
+            "2 = LIKELY relevant — the summary plausibly addresses the question "
+            "subject, though the connection may not be explicit\n"
+            "3 = CLEARLY IMPORTANT — the summary explicitly addresses the specific "
+            "subject of the question, not merely a related domain\n\n"
+            "Base each score on what the summary explicitly states. Do not assign a "
+            "high score because you can imagine a possible connection; assign 3 only "
+            "when the summary itself makes the relevance apparent.\n\n"
             f"Question:\n{self.question_text}\n\n"
         )
 
@@ -2229,69 +3007,6 @@ class QuestionProcessor:
                 results[(type_key, num)] = 1
 
         return results
-
-    def _apply_group_promotion(self, scores: dict) -> bool:
-        """
-        Promote all text-bearing members of a substantive unit family to the group max score.
-
-        A "family" is a top-level substantive unit together with all of its text-bearing
-        sub-units at any nesting depth.  If any member scores above 0, every other member
-        of the same family is elevated to that same max score.  This ensures that when any
-        part of a logically unified unit is relevant, analysts receive all of its prose
-        components — not just the piece whose summary happened to score highest.
-
-        Data-table and other text-less sub-units are not part of any family (they are
-        never handed to prose analysts regardless of score).
-
-        Returns True if any scores were changed.
-        """
-        param_pointer = self.parsed_content["document_information"]["parameters"]
-        content_pointer = self.parsed_content["content"]
-        changed = False
-
-        for item_type in param_pointer:
-            p = param_pointer[item_type]
-            if not (p.get("operational") == 1 and "name" in p and "name_plural" in p):
-                continue
-            if p.get("is_sub_unit", False):
-                continue
-            item_type_names = p["name_plural"]
-            if item_type_names not in content_pointer:
-                continue
-
-            for item_num, item_data in content_pointer[item_type_names].items():
-                if not has_sub_units(item_data):
-                    continue
-
-                # Collect all text-bearing members of this family.
-                members: List[Tuple[str, str]] = []  # (type_key, num)
-
-                if item_data.get("text"):
-                    members.append((item_type, item_num))
-
-                for sub_type_key_str, _, sub_num, _ in _iter_text_bearing_sub_units(param_pointer, item_data):
-                    members.append((sub_type_key_str, sub_num))
-
-                if len(members) <= 1:
-                    continue  # nothing to promote
-
-                # Find the highest score any family member has received.
-                max_score = max(
-                    scores.get(type_key, {}).get(num, 0)
-                    for type_key, num in members
-                )
-
-                if max_score == 0:
-                    continue  # no member is relevant — nothing to promote
-
-                # Elevate every under-scored (or unscored) member to max_score.
-                for type_key, num in members:
-                    current = scores.get(type_key, {}).get(num, 0)
-                    if current < max_score:
-                        scores.setdefault(type_key, {})[num] = max_score
-                        changed = True
-
-        return changed
 
     def score_relevance(self, max_tokens: int = 1000) -> None:
         """
@@ -2478,6 +3193,8 @@ class QuestionProcessor:
                 scored_count += 1
                 if self.progress_callback and total_to_score > 0:
                     self.progress_callback('relevance_scoring', 'processing', scored_count, total_to_score)
+            pct = int(scored_count * 100 / total_to_score) if total_to_score else 100
+            print(f"\r    {scored_count}/{total_to_score} ({pct}%)", end="", flush=True)
             current_batch = []
             current_batch_chars = 0
 
@@ -2492,6 +3209,7 @@ class QuestionProcessor:
             current_batch_chars += summary_len
 
         _flush_batch()
+        print()  # end the progress line
 
         if to_score:
             updated = True
@@ -2558,11 +3276,6 @@ class QuestionProcessor:
                 if to_rescore:
                     updated = True
 
-        # Step 4: Group promotion — if any text-bearing member of a substantive unit
-        # family scored above 0, elevate all other text-bearing members to the same score.
-        if self._apply_group_promotion(scores):
-            updated = True
-
         self.question_object["scores"] = scores
 
         # Mark scoring as complete (idempotency)
@@ -2581,1102 +3294,757 @@ class QuestionProcessor:
             print("  Mode configured to stop after scoring - skipping analysis phases")
             return
 
-    def process_relevant_section_requests(self) -> int:
-        """
-        Process request_relevant_section actions from the scratch document:
-        1. Add requested sections to the scores with a default score of 2 (likely relevant)
-        2. Add requested sections to the requesting unit's need_ref list (for summary_2)
-        3. Create detail requests for summary_2 of the newly referenced units
-        4. Remove fulfilled requests from scratch (unfulfilled ones remain as warnings)
+    # ------------------------------------------------------------------
+    # WS8 orchestration helpers
+    # ------------------------------------------------------------------
 
-        Returns the number of new sections added to the scores.
-        """
-        if (
-            "document_information" not in self.parsed_content
-            or "parameters" not in self.parsed_content["document_information"]
-            or "content" not in self.parsed_content
-        ):
-            raise InputError("process_relevant_section_requests: invalid parsed_content structure.")
+    def _get_active_unit_labels(self) -> set:
+        """Return the set of labeled unit IDs across primary and cross-doc pools."""
+        labels: set = set()
+        for unit_info in self._build_active_pool():
+            if unit_info["external_doc_label"]:
+                sm = ScratchDocumentManager(
+                    self.question_object,
+                    source_doc_label=unit_info["external_doc_label"],
+                )
+                labels.add(sm._label(unit_info["unit_label"]))
+            else:
+                labels.add(unit_info["unit_label"])
+        return labels
 
-        scratch = self.question_object.get("scratch", {})
-        requests = scratch.get("requests", {})
+    def _build_active_pool(self) -> List[Dict[str, Any]]:
+        """
+        Build the list of all scoreable units for Phase 1/2/3.
+
+        Each entry:
+          unit_id, unit_label, labeled_unit_id, type_name, type_names, type_key,
+          score, working_item, parsed_content, external_doc_label, parent_parsed_content
+        """
+        pool: List[Dict[str, Any]] = []
+        param_pointer = self.parsed_content.get("document_information", {}).get("parameters", {})
         scores = self.question_object.get("scores", {})
-        param_pointer = self.parsed_content["document_information"]["parameters"]
-        content_pointer = self.parsed_content["content"]
 
-        new_sections_added = 0
-        requests_to_remove = []  # Track fulfilled requests to remove
+        def _is_data_table_type(parsed_doc: Dict[str, Any], type_name: str) -> bool:
+            params = parsed_doc.get("document_information", {}).get("parameters", {})
+            return any(
+                isinstance(p, dict)
+                and p.get("name") == type_name
+                and p.get("data_table")
+                and p.get("is_sub_unit")
+                for p in params.values()
+            )
 
-        # Process all request_relevant_section actions
-        # Iterate over a list copy to avoid RuntimeError if we modify during iteration
-        for req_id, req_data in list(requests.items()):
-            if not isinstance(req_data, dict):
+        for item_type, type_scores in scores.items():
+            p = _resolve_param_key(param_pointer, item_type)
+            if not p:
                 continue
-            if req_data.get("action") != "request_relevant_section":
+            if not (p.get("operational") == 1 and p.get("name") and p.get("name_plural")):
                 continue
+            item_type_name = p["name"]
+            item_type_names = p["name_plural"]
 
-            target_type = str(req_data.get("target_type", "")).strip()
-            target_number = str(req_data.get("target_number", "")).strip()
-            source_list = req_data.get("source", [])
+            for item_num, score in type_scores.items():
+                if score < 2:
+                    continue
+                working_item = lookup_item(self.parsed_content, item_type_names, item_num)
+                if not working_item:
+                    continue
+                if not working_item.get("text") and not (
+                    _is_data_table_type(self.parsed_content, item_type_name)
+                    and working_item.get("summary_1")
+                ):
+                    continue
+                pool.append({
+                    "unit_id": item_num,
+                    "unit_label": f"{item_type_name.capitalize()} {item_num}",
+                    "type_name": item_type_name,
+                    "type_names": item_type_names,
+                    "type_key": str(item_type),
+                    "score": score,
+                    "working_item": working_item,
+                    "parsed_content": self.parsed_content,
+                    "external_doc_label": None,
+                    "parent_parsed_content": getattr(self, "_parent_parsed_content", None),
+                })
 
+        # Cross-document units
+        cds = self.question_object.get("cross_doc_scores", {})
+        for ext_file, ext_scores in cds.items():
+            ext_doc = self._load_external_document(ext_file)
+            if not ext_doc:
+                continue
+            ext_label = os.path.basename(ext_file).replace("_processed.json", "")
+            ext_params = ext_doc.get("document_information", {}).get("parameters", {})
+
+            for type_name, type_scores_for_type in ext_scores.items():
+                item_type_name = type_name
+                item_type_names = None
+                for _pk, _pd in ext_params.items():
+                    if isinstance(_pd, dict) and _pd.get("name", "").lower() == type_name.lower():
+                        item_type_name = _pd["name"]
+                        item_type_names = _pd.get("name_plural", type_name + "s")
+                        break
+                if not item_type_names:
+                    try:
+                        _, item_type_names = canonical_org_types(type_name.lower())
+                    except Exception:
+                        item_type_names = type_name + "s"
+
+                for item_num, score in type_scores_for_type.items():
+                    if score < 2:
+                        continue
+                    working_item = lookup_item(ext_doc, item_type_names, item_num)
+                    if not working_item:
+                        continue
+                    if not working_item.get("text") and not (
+                        _is_data_table_type(ext_doc, item_type_name)
+                        and working_item.get("summary_1")
+                    ):
+                        continue
+                    pool.append({
+                        "unit_id": item_num,
+                        "unit_label": f"{item_type_name.capitalize()} {item_num}",
+                        "type_name": item_type_name,
+                        "type_names": item_type_names,
+                        "type_key": item_type_name.lower(),
+                        "score": score,
+                        "working_item": working_item,
+                        "parsed_content": ext_doc,
+                        "external_doc_label": ext_label,
+                        "parent_parsed_content": None,
+                    })
+
+        pool.sort(key=lambda u: -u["score"])
+        return pool
+
+    def _make_chunk_analyzer_for_unit(
+        self,
+        unit_info: Dict[str, Any],
+        scratch_manager: ScratchDocumentManager,
+        client,
+    ) -> "ChunkAnalyzer":
+        """Create a ChunkAnalyzer wired to the given unit's document and scratch."""
+        context_builder = ContextBuilder(
+            unit_info["parsed_content"],
+            self.question_text,
+            external_doc_label=unit_info["external_doc_label"],
+            parent_parsed_content=unit_info["parent_parsed_content"],
+        )
+        return ChunkAnalyzer(
+            client,
+            self.logfile,
+            context_builder,
+            scratch_manager,
+            self.question_object,
+            unit_info["parsed_content"],
+            {},
+            config=self._config,
+        )
+
+    def _run_unit_phase1(
+        self,
+        unit_info: Dict[str, Any],
+        scratch_manager: ScratchDocumentManager,
+        phase_client,
+        gate_client,
+    ) -> int:
+        """
+        Phase 1 for one unit: extract, gate, and add facts.
+        Returns count of facts accepted/merged.
+        """
+        unit_label = unit_info["unit_label"]
+        item_type_name = unit_info["type_name"]
+        item_num = unit_info["unit_id"]
+        external_doc_label = unit_info["external_doc_label"]
+
+        chunk_analyzer = self._make_chunk_analyzer_for_unit(unit_info, scratch_manager, phase_client)
+        proposed_facts, _proposed_requests = chunk_analyzer.analyze_phase1(
+            unit_info["working_item"],
+            item_type_name,
+            item_num,
+            score_level=unit_info["score"],
+        )
+
+        if not proposed_facts:
+            return 0
+
+        # Source label is the unit label, possibly qualified by external doc
+        if external_doc_label:
+            sm_for_label = ScratchDocumentManager(
+                self.question_object, source_doc_label=external_doc_label
+            )
+            source_label = sm_for_label._label(unit_label)
+        else:
+            source_label = unit_label
+
+        accepted = 0
+        for fact_content in proposed_facts:
+            verdict = _gate_and_merge_fact(
+                scratch_manager, gate_client, self._config, self.logfile,
+                self.question_text, fact_content, source_label,
+            )
+            if verdict["verdict"] == "accept":
+                scratch_manager.add_fact(fact_content, source_label)
+                accepted += 1
+            elif verdict["verdict"] == "merge" and verdict.get("merge_fact_id"):
+                scratch_manager.merge_fact(
+                    verdict["merge_fact_id"],
+                    source_label,
+                    updated_content=verdict.get("merged_content"),
+                )
+                accepted += 1
+
+        return accepted
+
+    def _process_ws8_section_requests(
+        self,
+        pending_requests: List[Dict[str, Any]],
+    ) -> int:
+        """
+        Process section requests collected during Phase 2.
+        Adds validated units to scores for next round.
+        Returns count of new units added.
+        """
+        if not pending_requests:
+            return 0
+
+        param_pointer = self.parsed_content.get("document_information", {}).get("parameters", {})
+        scores = self.question_object.setdefault("scores", {})
+        new_units = 0
+
+        for req in pending_requests:
+            target_type = req["target_type"].strip()
+            target_number = req["target_number"].strip()
             if not target_type or not target_number:
                 continue
 
-            # Find the parameter type that matches this target_type
+            # Find parameter entry by name
             item_type_key = None
-            item_type_name = None
-            for param_key, param_data in param_pointer.items():
-                if not isinstance(param_data, dict):
+            item_type_names = None
+            for pk, pd in param_pointer.items():
+                if not isinstance(pd, dict):
                     continue
-                if not (param_data.get("operational") == 1 and "name" in param_data):
+                if not (pd.get("operational") == 1 and pd.get("name")):
                     continue
-                param_name = param_data["name"].lower()
-                if param_name == target_type.lower():
-                    item_type_key = param_key
-                    item_type_name = param_data["name"]
+                if pd["name"].lower() == target_type.lower():
+                    item_type_key = pk
+                    item_type_names = pd.get("name_plural", "")
                     break
 
-            if not item_type_key:
-                # Try to find by checking if target_type matches any parameter name
-                # This handles variations in capitalization
-                for param_key, param_data in param_pointer.items():
-                    if not isinstance(param_data, dict):
-                        continue
-                    if not (param_data.get("operational") == 1 and "name" in param_data):
-                        continue
-                    param_name = param_data["name"]
-                    if param_name.lower() == target_type.lower() or param_name.lower().strip("s") == target_type.lower().strip("s"):
-                        item_type_key = param_key
-                        item_type_name = param_data["name"]
-                        break
-
-            if not item_type_key:
-                # Could not find matching item type - leave request in scratch as warning
+            if not item_type_key or not item_type_names:
                 continue
 
-            # Verify the section exists in content
-            param_data = param_pointer[item_type_key]
-            item_type_names = param_data.get("name_plural", "")
-            if not item_type_names:
-                continue
+            # Verify unit exists in primary document
             if lookup_item(self.parsed_content, item_type_names, target_number) is None:
-                # Not in primary doc — try external documents already loaded
+                # Try cross-doc external documents
                 for ext_file, ext_doc in self._external_documents.items():
                     if lookup_item(ext_doc, item_type_names, target_number) is not None:
-                        if self._add_cross_doc_unit(ext_file, item_type_name.lower(), target_number):
-                            new_sections_added += 1
-                            ext_name = os.path.basename(ext_file).replace('_processed.json', '')
-                            print(f"  Cross-doc: queued {item_type_name} {target_number} from "
-                                  f"{ext_name} (via section request)")
-                        requests_to_remove.append(req_id)
+                        ttype = target_type.lower()
+                        if self._add_cross_doc_unit(ext_file, ttype, target_number):
+                            new_units += 1
+                            ext_name = os.path.basename(ext_file).replace("_processed.json", "")
+                            print(f"  Cross-doc (request): added {target_type} {target_number}"
+                                  f" from {ext_name}")
                         break
-                # Skip primary-doc processing: either we queued it externally, or it's not
-                # found anywhere (leave request in scratch as a warning in the latter case).
                 continue
 
-            # Request can be fulfilled - process it
+            # Add to primary-doc scores if not already present at score 2+
+            type_scores = scores.setdefault(str(item_type_key), {})
+            if target_number not in type_scores or type_scores[target_number] < 2:
+                type_scores[target_number] = 2
+                new_units += 1
+                print(f"  Section request: added {target_type} {target_number} (score 2)")
 
-            # 1. Add to scores if not already there
-            if item_type_key not in scores:
-                scores[item_type_key] = {}
-
-            if target_number not in scores[item_type_key]:
-                scores[item_type_key][target_number] = 2
-                new_sections_added += 1
-                # Remove from skip list if it was there
-                self._remove_from_skip_list(target_type.lower(), target_number)
-            elif scores[item_type_key][target_number] < 2:
-                # Bump score-1 units to 2 when explicitly requested
-                scores[item_type_key][target_number] = 2
-                new_sections_added += 1
-                self._remove_from_skip_list(target_type.lower(), target_number)
-                print(f"  Bumped {item_type_name} {target_number} from score 1 to score 2 (explicit request)")
-
-            # 2. Add to requesting unit's need_ref list and create detail request
-            # Parse source to identify requesting unit(s)
-            for source_label in source_list:
-                if not isinstance(source_label, str):
-                    continue
-                # source_label format: "Section 5", "Article 12", etc.
-                parts = source_label.split()
-                if len(parts) < 2:
-                    continue
-                requesting_type_name = parts[0].lower()
-                requesting_number = parts[1]
-
-                # Find the requesting unit in content
-                requesting_type_plural = None
-                for param_key, param_data in param_pointer.items():
-                    if not isinstance(param_data, dict):
-                        continue
-                    if param_data.get("name", "").lower() == requesting_type_name:
-                        requesting_type_plural = param_data.get("name_plural", "")
-                        break
-
-                if not requesting_type_plural:
-                    continue
-                requesting_unit = lookup_item(self.parsed_content, requesting_type_plural, requesting_number)
-                if requesting_unit is None:
-                    continue
-
-                # Add to need_ref if not already there
-                if "need_ref" not in requesting_unit:
-                    requesting_unit["need_ref"] = []
-
-                # Check if already in need_ref
-                already_referenced = False
-                for ref in requesting_unit["need_ref"]:
-                    if isinstance(ref, dict) and ref.get("type", "").lower() == target_type.lower() and ref.get("value") == target_number:
-                        already_referenced = True
-                        break
-
-                if not already_referenced:
-                    requesting_unit["need_ref"].append({
-                        "type": item_type_name,
-                        "value": target_number
-                    })
-
-            # 3. Add detail request for summary_2
-            # Use ScratchDocumentManager to add the detail request
-            scratch_manager = ScratchDocumentManager(self.question_object)
-            scratch_manager.add_detail_request(
-                target_type,
-                target_number,
-                "summary_2",
-                "System"  # Source label for auto-generated requests
-            )
-
-            # 4. Mark this request for removal (it's been fulfilled)
-            requests_to_remove.append(req_id)
-
-        # Remove fulfilled requests from scratch
-        if requests_to_remove:
-            for req_id in requests_to_remove:
-                if req_id in requests:
-                    del requests[req_id]
-
-        if new_sections_added > 0:
-            # Apply group promotion so that requesting one member of a substantive unit
-            # family automatically includes all other text-bearing members at the same score.
-            self._apply_group_promotion(scores)
-
-        if new_sections_added > 0 or requests_to_remove:
-            self.question_object["scores"] = scores
+        if new_units:
             self._save_question_object()
-            if new_sections_added > 0:
-                print(f"  Added {new_sections_added} new section(s) to analysis based on relevant section requests")
-            if requests_to_remove:
-                print(f"  Removed {len(requests_to_remove)} fulfilled request(s) from scratch document")
+        return new_units
 
-        return new_sections_added
-
-    # ------------------------------------------------------------------
-    # Iterative analysis
-    # ------------------------------------------------------------------
-
-    def run_analysis_iteration(self, refine: bool) -> Tuple[bool, int]:
+    def _close_questions(
+        self,
+        scratch_manager: ScratchDocumentManager,
+        active_unit_labels: set,
+        unit_queue_empty: bool = True,
+    ) -> int:
         """
-        Perform a single analysis iteration over items with score > 0.
-        
-        Returns:
-            Tuple[bool, int]: (changed, new_sections_added)
-            - changed: True if the scratch or working_answer was updated
-            - new_sections_added: Number of new sections added to scores via relevant section requests
+        Close questions that are exhausted (all active units have been asked and
+        unit queue is empty). A question is 'answered' if any facts were accepted
+        in response to it; otherwise 'unanswerable'. No per-question synthesis.
+
+        Returns count of questions newly closed.
         """
-        if (
-            "document_information" not in self.parsed_content
-            or "parameters" not in self.parsed_content["document_information"]
-            or "content" not in self.parsed_content
-        ):
-            raise InputError("run_analysis_iteration: invalid parsed_content structure.")
-
-        param_pointer = self.parsed_content["document_information"]["parameters"]
-        content_pointer = self.parsed_content["content"]
-        scores = self.question_object.get("scores", {})
-
-        # Capture scratch snapshot at beginning of iteration for fact deduplication
-        # This ensures facts are compared only against facts from prior passes
-        scratch_snapshot = copy.deepcopy(self.question_object.get("scratch", {}))
-
-        changed_any = False
-        client = self._get_client_for_phase('iterative_analysis')
-        item_analyzer = ItemAnalyzer(
-            client,
-            self.logfile,
-            self.parsed_content,
-            self.question_object,
-            scratch_snapshot,
-            parent_parsed_content=getattr(self, '_parent_parsed_content', None),
-        )
-
-        # Process items in order of decreasing score (3 → 1).
-        # Score-1 gate: always skip score-1 on the first pass (refine=False).
-        # If score_1_gate config is True, also skip score-1 on all subsequent passes.
-        score_1_gate = self.mode_config.get("score_1_gate", False)
-        compact_after_additions = self.mode_config.get("compact_after_additions", 0)
-        additions_since_compact = 0
-
-        # Treat all facts already on disk as "compacted" so that _detect_implicit_references
-        # with pending_only=True only scans facts added during this call.
-        self._compacted_fact_ids = set(
-            self.question_object.get("scratch", {}).get("fact", {}).keys()
-        )
-
-        for score_level in (3, 2, 1):
-            if score_level == 1 and (not refine or score_1_gate):
-                continue  # always gate on first pass; also gate on refine passes if config says so
-
-            for item_type, type_scores in scores.items():
-                p = _resolve_param_key(param_pointer, item_type)
-                if not p:
-                    continue
-                if not (p.get("operational") == 1 and "name" in p and "name_plural" in p):
-                    continue
-                item_type_name = p["name"]
-                item_type_names = p["name_plural"]
-
-                for item_num, score in list(type_scores.items()):
-                    if score != score_level:
-                        continue
-                    working_item = lookup_item(self.parsed_content, item_type_names, item_num)
-                    if working_item is None:
-                        continue
-                    if not working_item.get("text"):
-                        continue
-
-                    # Check if we should skip this unit (optimization)
-                    if self._should_skip_unit(item_type_name, item_num, refine):
-                        print(f"  Skipping {item_type_name} {item_num} (relevance: {score}) - no changes since last empty analysis")
-                        continue
-
-                    # Track scratch document before analysis
-                    scratch_before = self.question_object.get("scratch", {})
-                    facts_before = len(scratch_before.get("fact", {}))
-                    questions_before = len(scratch_before.get("question", {}))
-                    requests_before = len(scratch_before.get("requests", {}))
-
-                    print(f"  Analyzing {item_type_name} {item_num} (relevance: {score})...", end="")
-
-                    changed, had_actions, question_ids_added, question_ids_answered = item_analyzer.analyze_item(
-                        item_type_name,
-                        item_type_names,
-                        item_num,
-                        working_item,
-                        self.question_text,
-                        refine,
-                        score_level=score_level,
-                    )
-
-                    # Manage skip list based on results
-                    # If new question was added, clear the entire skip list
-                    if question_ids_added:
-                        self._clear_skip_list()
-
-                    # If answer was added to a question, remove all source units from skip list
-                    for q_id in question_ids_answered:
-                        scratch = self.question_object.get("scratch", {})
-                        questions = scratch.get("question", {})
-                        q_data = questions.get(q_id, {})
-                        if isinstance(q_data, dict):
-                            sources = q_data.get("source", [])
-                            for source_label in sources:
-                                # Parse source label (e.g., "Section 201" -> item_type_name="section", item_number="201")
-                                # Source labels are formatted as "{Type} {Number}" with a single space
-                                parts = source_label.split(None, 1)  # Split on first space only
-                                if len(parts) == 2:
-                                    source_type = parts[0].lower()
-                                    source_num = parts[1]
-                                    self._remove_from_skip_list(source_type, source_num)
-
-                    # If analysis returned empty actions, add unit to skip list
-                    if not had_actions:
-                        self._add_to_skip_list(item_type_name, item_num)
-
-                    if changed:
-                        changed_any = True
-                        self._save_question_object()
-
-                        # Show what was added
-                        scratch_after = self.question_object.get("scratch", {})
-                        facts_added = len(scratch_after.get("fact", {})) - facts_before
-                        questions_added_count = len(scratch_after.get("question", {})) - questions_before
-                        requests_added = len(scratch_after.get("requests", {})) - requests_before
-
-                        results = []
-                        if facts_added > 0:
-                            results.append(f"{facts_added} fact(s)")
-                        if questions_added_count > 0:
-                            results.append(f"{questions_added_count} question(s)")
-                        if requests_added > 0:
-                            results.append(f"{requests_added} detail request(s)")
-
-                        if results:
-                            print(f" Added: {', '.join(results)}")
-                        else:
-                            print(f" Updated")
-
-                        # Interval compaction: compact after every compact_after_additions additions
-                        if compact_after_additions > 0:
-                            additions_since_compact += facts_added + questions_added_count
-                            if additions_since_compact >= compact_after_additions:
-                                # Scan pending (uncompacted) facts for cross-references before
-                                # compaction abstracts specific unit identifiers.
-                                self._detect_implicit_references(pending_only=True)
-                                self._compact_scratch()
-                                additions_since_compact = 0
-                    else:
-                        print(f" No changes")
-
-            # End of score group: scan pending facts for cross-references, then compact residual.
-            if compact_after_additions > 0 and additions_since_compact > 0:
-                self._detect_implicit_references(pending_only=True)
-                self._compact_scratch()
-                additions_since_compact = 0
-            elif compact_after_additions == 0:
-                # No interval compaction — scan all facts added this pass.
-                self._detect_implicit_references(pending_only=True)
-
-        # Cross-document unit analysis — units queued in cross_doc_scores
-        cds = self.question_object.get("cross_doc_scores", {})
-        for ext_file_path, ext_scores_for_doc in cds.items():
-            ext_parsed_content = self._load_external_document(ext_file_path)
-            if ext_parsed_content is None:
+        closed = 0
+        for q in scratch_manager.get_open_questions():
+            if not unit_queue_empty:
                 continue
-
-            ext_param_pointer = ext_parsed_content.get("document_information", {}).get("parameters", {})
-            ext_doc_label = os.path.basename(ext_file_path).replace('_processed.json', '')
-
-            for item_type_stored, type_scores in ext_scores_for_doc.items():
-                # Find param entry by name in the external document
-                item_type_name = item_type_stored
-                item_type_name_plural = None
-                for pk, pd in ext_param_pointer.items():
-                    if not isinstance(pd, dict):
-                        continue
-                    if pd.get("name", "").lower() == item_type_stored.lower():
-                        item_type_name = pd["name"]
-                        item_type_name_plural = pd.get("name_plural", item_type_name + "s")
-                        break
-                if item_type_name_plural is None:
-                    try:
-                        _, item_type_name_plural = canonical_org_types(item_type_stored)
-                    except Exception:
-                        item_type_name_plural = item_type_stored + "s"
-
-                for item_num, score in type_scores.items():
-                    if score not in (2, 3):
-                        continue
-
-                    working_item = lookup_item(ext_parsed_content, item_type_name_plural, item_num)
-                    if working_item is None or not working_item.get("text"):
-                        continue
-
-                    print(f"  Analyzing [external:{ext_doc_label}] {item_type_name} {item_num} "
-                          f"(score: {score})...", end="")
-
-                    scratch_before = self.question_object.get("scratch", {})
-                    facts_before = len(scratch_before.get("fact", {}))
-                    questions_before = len(scratch_before.get("question", {}))
-                    requests_before = len(scratch_before.get("requests", {}))
-
-                    cross_doc_analyzer = ItemAnalyzer(
-                        client,
-                        self.logfile,
-                        ext_parsed_content,
-                        self.question_object,
-                        scratch_snapshot,
-                        external_doc_label=ext_doc_label,
-                    )
-                    changed, had_actions, question_ids_added, question_ids_answered = (
-                        cross_doc_analyzer.analyze_item(
-                            item_type_name,
-                            item_type_name_plural,
-                            item_num,
-                            working_item,
-                            self.question_text,
-                            refine,
-                            score_level=score,
-                        )
-                    )
-
-                    if changed:
-                        changed_any = True
-                        self._save_question_object()
-                        scratch_after = self.question_object.get("scratch", {})
-                        facts_added = len(scratch_after.get("fact", {})) - facts_before
-                        questions_added_count = len(scratch_after.get("question", {})) - questions_before
-                        requests_added = len(scratch_after.get("requests", {})) - requests_before
-                        results = []
-                        if facts_added > 0:
-                            results.append(f"{facts_added} fact(s)")
-                        if questions_added_count > 0:
-                            results.append(f"{questions_added_count} question(s)")
-                        if requests_added > 0:
-                            results.append(f"{requests_added} detail request(s)")
-                        if results:
-                            print(f" Added: {', '.join(results)}")
-                        else:
-                            print(f" Updated")
-                    else:
-                        print(f" No changes")
-
-        # Process any relevant section requests that were made during this iteration
-        new_sections_added = self.process_relevant_section_requests()
-
-        # Scan newly-analyzed cross-doc units for registry refs to further external units
-        new_cross_doc = self._refresh_cross_document_units()
-        if new_cross_doc > 0:
-            new_sections_added += new_cross_doc
-
-        # End-of-round dedup (only when not using interval compaction)
-        if self.mode_config.get("deduplicate_new_facts", False) and compact_after_additions == 0:
-            self._deduplicate_new_facts(scratch_snapshot)
-
-        # Final compaction: pick up any residual additions since last interval fire
-        if compact_after_additions > 0 and additions_since_compact > 0:
-            self._compact_scratch()
-
-        return changed_any, new_sections_added
-
-    def _deduplicate_new_facts(self, scratch_before: Dict) -> int:
-        """
-        Remove facts added in the just-completed round that are redundant with
-        facts from the round-start snapshot.  Single batch AI call.
-
-        Args:
-            scratch_before: frozen snapshot taken at round start
-
-        Returns:
-            Number of facts removed
-        """
-        live_facts = self.question_object.get("scratch", {}).get("fact", {})
-        prior_facts = scratch_before.get("fact", {})
-
-        new_fact_ids = [fid for fid in live_facts if fid not in prior_facts]
-        if not new_fact_ids or not prior_facts:
-            return 0
-
-        prompt_parts = [
-            "You are reviewing facts extracted from a legal document analysis.\n\n"
-            f"Primary Question: {self.question_text}\n\n"
-            "Facts established in prior rounds:\n\n"
-        ]
-        for i, (fid, fdata) in enumerate(prior_facts.items(), 1):
-            prompt_parts.append(f"{i}. {fdata.get('content', '')}\n")
-
-        prompt_parts.append("\nNew candidate facts from this round:\n\n")
-        for fid in new_fact_ids:
-            content = live_facts[fid].get("content", "")
-            prompt_parts.append(f"  \"{fid}\": {content}\n")
-
-        prompt_parts.append(
-            "\nFor each candidate fact ID, decide: does it provide materially new "
-            "information not already covered by the established facts?\n"
-            "Return a JSON object: {\"fact_id\": true|false, ...}\n"
-            "true = keep (is new), false = remove (redundant).\n"
-            "When uncertain, keep (true).\n"
-        )
-
-        try:
-            client = self._get_client_for_phase('iterative_analysis')
-            max_tokens = max(len(new_fact_ids) * 15 + 300, 300)
-            result = query_json(
-                client, [], "".join(prompt_parts), self.logfile,
-                max_tokens=max_tokens, config=self._config,
-                task_name='qa.analysis.analyze_chunk'
-            )
-        except Exception:
-            return 0
-
-        removed = 0
-        if isinstance(result, dict):
-            for fid in new_fact_ids:
-                keep = result.get(fid, True)  # default keep if missing
-                if keep is False or keep == 0:
-                    live_facts.pop(fid, None)
-                    removed += 1
-
-        if removed > 0:
-            print(f"  End-of-round dedup: removed {removed} redundant fact(s)")
-            self._save_question_object()
-
-        return removed
-
-    def _detect_implicit_references(self, pending_only: bool = False) -> int:
-        """
-        Use an LLM to identify unit identifiers meaningfully referenced in scratch facts,
-        then match those identifiers to scored units using backward-prefix matching.
-
-        When pending_only=True, only facts added since the last compaction are scanned.
-        This is used to detect cross-references before compaction can abstract specific
-        unit identifiers (e.g. "3A090") into generic text. The caller is responsible for
-        invoking this before each _compact_scratch() call.
-
-        When pending_only=False (the historical default), all current facts are scanned.
-
-        The candidate list is NOT sent to the LLM (it may be very large). Instead the LLM
-        reads the fact text and returns identifiers as it sees them; matching logic then
-        resolves each to a known scored unit, handling sub-paragraph references like
-        "3A090.a" → ECCN "3A090".
-
-        Only runs when implicit_reference_detection is True in mode config.
-
-        Returns:
-            Number of units promoted.
-        """
-        if not self.mode_config.get("implicit_reference_detection", False):
-            return 0
-
-        scratch = self.question_object.get("scratch", {})
-        all_facts = scratch.get("fact", {})
-        scores = self.question_object.get("scores", {})
-        param_pointer = self.parsed_content["document_information"]["parameters"]
-
-        if pending_only:
-            facts = {k: v for k, v in all_facts.items() if k not in self._compacted_fact_ids}
-        else:
-            facts = all_facts
-
-        if not facts:
-            return 0
-
-        # Skip the LLM call if there are no score-0/1 units to promote.
-        has_promotable = any(
-            score < 2
-            for type_scores in scores.values()
-            for score in (type_scores.values() if isinstance(type_scores, dict) else [])
-        )
-        if not has_promotable:
-            return 0
-
-        facts_text = "\n".join(
-            f"- {fdata.get('content', '')}" for fdata in facts.values()
-        )
-
-        # Ask the LLM to identify referenced unit identifiers from the fact text.
-        # No candidate list is provided — we match the response ourselves.
-        prompt = (
-            f"Primary Question: {self.question_text}\n\n"
-            "The following facts were extracted from a legal document section. "
-            "Identify any other units (sections, articles, ECCNs, etc.) whose content the "
-            "facts suggest is needed to answer the Primary Question — for example, because "
-            "the answer requires knowing a threshold, parameter, list, or requirement defined "
-            "in that unit.\n\n"
-            f"Facts:\n{facts_text}\n\n"
-            "Do not include a unit merely because it is mentioned, cross-referenced, or listed "
-            "as related. Include a unit only when its absence from the analysis would leave the "
-            "Primary Question materially incomplete or unanswerable.\n\n"
-            "Return a JSON object with key 'referenced_units' containing a list of unit "
-            "identifiers exactly as they appear in the facts (e.g., section numbers, "
-            "ECCN numbers, article numbers).\n"
-            "Example: {\"referenced_units\": [\"3A090\", \"5A001\"]}\n"
-            "If none qualify: {\"referenced_units\": []}"
-        )
-
-        try:
-            client = self._get_client_for_phase('iterative_analysis')
-            result = query_json(
-                client, [], prompt, self.logfile,
-                max_tokens=500, config=self._config,
-                task_name='qa.analysis.analyze_chunk'
-            )
-        except Exception as e:
-            print(f"  Implicit reference detection failed: {e}")
-            return 0
-
-        if not isinstance(result, dict) or "referenced_units" not in result:
-            return 0
-
-        referenced = result.get("referenced_units", [])
-        if not isinstance(referenced, list):
-            return 0
-
-        # Build type_name → param_key map for all operational types.
-        type_to_param_key: Dict[str, str] = {}
-        for pk, pd in param_pointer.items():
-            if isinstance(pd, dict) and pd.get("operational") == 1 and "name" in pd:
-                type_to_param_key[pd["name"]] = pk
-        operational_types = list(type_to_param_key.keys())
-
-        # For each LLM-returned identifier, resolve it to a scored unit using
-        # find_substantive_unit_with_maximum_matching (shared with Process_Stage_3.py).
-        # This handles exact matches and backward-prefix matches (e.g., "3A090.a" → "3A090").
-        promoted = 0
-        promoted_ids: set = set()
-        for ref_id in referenced:
-            if not isinstance(ref_id, str):
+            seen_by = set(q.get("seen_by", []))
+            if not active_unit_labels.issubset(seen_by):
                 continue
+            has_facts = bool(q.get("supporting_fact_ids"))
+            q["status"] = "answered" if has_facts else "unanswerable"
+            closed += 1
+        return closed
 
-            matched_type = None
-            matched_id = None
-            for element_type in operational_types:
-                mt, mid = find_substantive_unit_with_maximum_matching(
-                    self.parsed_content, element_type, ref_id
-                )
-                if mid is not None:
-                    matched_type = mt
-                    matched_id = mid
-                    break  # unit IDs are typically distinct across types
-
-            if matched_id is None or matched_id in promoted_ids:
-                continue
-
-            param_key = type_to_param_key.get(matched_type)
-            if not param_key:
-                continue
-
-            current_score = scores.get(param_key, {}).get(matched_id)
-            if current_score is not None and current_score >= 2:
-                continue  # already at/above 2, no promotion needed
-
-            if param_key not in scores:
-                scores[param_key] = {}
-            prev_score = scores[param_key].get(matched_id, 0)
-            scores[param_key][matched_id] = 2
-            self._remove_from_skip_list(matched_type, matched_id)
-            promoted_ids.add(matched_id)
-            promoted += 1
-            print(f"  Implicit reference: promoted {matched_type} {matched_id} from score {prev_score} to 2")
-
-        if promoted > 0:
-            self.question_object["scores"] = scores
-            self._save_question_object()
-
-        return promoted
-
-    def _compact_scratch(self) -> int:
+    def run_analysis(self) -> None:
         """
-        Consolidate facts by removing redundant and useless entries. Fires unconditionally
-        when called (no count threshold). Called on the interval set by compact_after_additions.
+        Queue-driven WS8 analysis (tasks 8.R1–8.R5).
 
-        Returns:
-            Number of facts removed (positive), or 0 if nothing to compact or call failed.
+        Replaces the old round-based run_round / run_to_stability loop.
+
+        State:
+          unit_queue   — FIFO of unit_info dicts pending Phase 1+2
+          active_units — ordered list of unit_info dicts that completed Phase 1
+          question_queue — FIFO of question IDs pending Phase 3 against already-active units
+
+        Each unit is processed exactly once through Phase 1+2.  After Phase 1+2, the
+        new unit is immediately asked about every open question (Phase 3 inline).
+        When the unit queue drains, the question queue is drained: each queued question
+        is asked of every active unit that has not yet seen it.  A question closes
+        (answered / unanswerable) when all active units have been asked and the unit
+        queue is empty.
         """
-        scratch = self.question_object.get("scratch", {})
-        facts = scratch.get("fact", {})
-        if not facts:
-            return 0
+        from collections import deque
 
-        count_before = len(facts)
-        print(f"  Scratch compaction: consolidating {count_before} facts...")
-
-        facts_json = json.dumps(facts, indent=2)
-
-        prompt = (
-            f"Primary Question: {self.question_text}\n\n"
-            f"The following {count_before} facts were collected during document analysis. "
-            "Consolidate them by removing redundant, duplicate, or marginally useful entries, "
-            "and merging facts that convey essentially the same information. "
-            "Keep only facts that are useful and non-redundant for answering the Primary Question.\n\n"
-            "Rules:\n"
-            "- Merge facts that convey the same information; combine their source lists.\n"
-            "- Remove facts that are fully covered by another retained fact.\n"
-            "- Keep facts that add distinct, useful details even if they seem related to others.\n"
-            "- Do not discard any fact that contains unique information relevant to the Primary Question.\n"
-            "- Do not fabricate new information.\n"
-            "- Preserve the JSON schema: each fact has 'content' and 'source' fields.\n\n"
-            f"Current facts:\n{facts_json}\n\n"
-            "Return a JSON object with a single key 'fact' containing the consolidated facts dict. "
-            "Use simple sequential IDs (fact_001, fact_002, ...). "
-            "Example: {\"fact\": {\"fact_001\": {\"content\": \"...\", \"source\": [\"Section 5\"]}, ...}}\n"
-        )
-
-        try:
-            client = self._get_client_for_phase('cleanup')
-            max_tokens = min(count_before * 300 + 500, 16000)
-            result = query_json(
-                client, [], prompt, self.logfile,
-                max_tokens=max_tokens, config=self._config,
-                task_name='qa.synthesis.cleanup_scratch'
-            )
-        except Exception as e:
-            print(f"  Scratch compaction failed: {e}")
-            return 0
-
-        if not isinstance(result, dict) or "fact" not in result:
-            print("  Scratch compaction: unexpected response shape, skipping")
-            return 0
-
-        new_facts = result["fact"]
-        if not isinstance(new_facts, dict):
-            return 0
-
-        scratch["fact"] = new_facts
-        self.question_object["scratch"] = scratch
-        removed = count_before - len(new_facts)
-        print(f"  Scratch compaction: {count_before} → {len(new_facts)} facts ({removed} removed)")
-        self._save_question_object()
-        # Update the baseline so subsequent pending_only detection only scans new additions.
-        self._compacted_fact_ids = set(new_facts.keys())
-        return removed
-
-    def run_to_stability(self, base_max_iterations: int = None) -> None:
-        """
-        Run analysis iterations until no further changes are made or the
-        maximum number of iterations is reached.
-        
-        The maximum iterations is dynamically extended: if new sections are added
-        during iteration N, the max_iterations is extended by base_max_iterations
-        (default 3) to allow those new sections to complete their full analysis cycle.
-        For example, if a section is added during iteration 3, max_iterations becomes 6.
-        
-        Args:
-            base_max_iterations: Maximum iterations (if None, uses mode_config["max_analysis_passes"])
-        """
-        # Use mode configuration if base_max_iterations not provided
-        if base_max_iterations is None:
-            base_max_iterations = self.mode_config.get("max_analysis_passes", 3)
-        
-        # Check progress and resume from where we left off (idempotency)
-        progress = self.question_object.get("progress", {})
-        iterations_completed = progress.get("analysis_iterations_completed", 0)
-        
-        # Start with base_max_iterations, but this will be dynamically extended
-        current_max_iterations = base_max_iterations
-        
-        # If we've already completed all iterations, skip
-        if iterations_completed >= current_max_iterations:
-            print(f"\nAnalysis already completed {iterations_completed} iteration(s), skipping...")
-            return
-        
-        # Start from the next iteration
-        iteration_num = iterations_completed + 1
-
-        # Report that iterative analysis phase has started (even before first iteration completes)
-        if self.progress_callback:
-            self.progress_callback('iterative_analysis', 'starting', iterations_completed, current_max_iterations)
-
-        # Flag to track whether the next iteration should be a refinement pass
-        # Start with False for first iteration, True after that
-        # Reset to False when new sections are added
-        should_refine = (iteration_num > 1)
-
-        # Initialize cross-document units from registry (idempotent; safe on resume)
+        scratch_manager = ScratchDocumentManager(self.question_object)
         self._initialize_cross_document_units()
 
-        # First iteration (or resume)
-        if iteration_num == 1:
-            iteration_type = "Initial Analysis"
-        else:
-            iteration_type = "Refinement Pass" if should_refine else "Initial Analysis"
+        phase1_client = self._get_client_for_phase("ws8_phase1")
+        phase2_client = self._get_client_for_phase("ws8_phase2")
+        fact_gate_client = self._get_client_for_phase("ws8_gate")
+        fact_close_match_client = self._get_client_for_phase("ws8_fact_close_match_gate")
+        question_gate_client = self._get_client_for_phase("ws8_question_gate")
+        question_close_match_client = self._get_client_for_phase("ws8_question_close_match_gate")
+        request_gate_client = self._get_client_for_phase("ws8_request_gate")
+
+        # --- State ---
+        initial_pool = self._build_active_pool()
+        unit_queue: deque = deque(initial_pool)
+        active_units: List[Dict[str, Any]] = []
+        active_unit_labels: set = set()
+        question_queue: deque = deque()
+        circleback_queue: deque = deque()  # (unit_info, question_dict) pairs
 
         print(f"\n{'='*70}")
-        print(f"ITERATION {iteration_num} ({iteration_type})")
+        print("ITERATIVE ANALYSIS (WS8 Queue-Driven)")
         print(f"{'='*70}")
-        changed, new_sections_added = self.run_analysis_iteration(refine=should_refine)
-        
-        # If new sections were added, reset refinement flag for next iteration
-        # so new sections get an initial analysis pass
-        if new_sections_added > 0:
-            should_refine = False
-            current_max_iterations = iteration_num + base_max_iterations
-            print(f"  Extended max_iterations to {current_max_iterations} to accommodate {new_sections_added} new section(s)")
-            print(f"  Next iteration will be Initial Analysis for newly added sections")
-        else:
-            # After processing current iteration, next should be refinement
-            should_refine = True
-        
-        # Update progress after first/resumed iteration
-        progress["analysis_iterations_completed"] = iteration_num
-        self.question_object["progress"] = progress
-        self._save_question_object()
+        print(f"Initial unit queue: {len(unit_queue)} unit(s)")
 
-        # Report progress if callback provided
-        if self.progress_callback:
-            self.progress_callback('iterative_analysis', 'processing', iteration_num, current_max_iterations)
+        # --- Helper: resolve a unit's display label ---
+        def _unit_label(unit_info: Dict[str, Any]) -> str:
+            if unit_info["external_doc_label"]:
+                sm_tmp = ScratchDocumentManager(
+                    self.question_object,
+                    source_doc_label=unit_info["external_doc_label"],
+                )
+                return sm_tmp._label(unit_info["unit_label"])
+            return unit_info["unit_label"]
 
-        # Continue with remaining iterations
-        # Loop continues while we have changes OR new sections were added, and iterations remain
-        while (changed or new_sections_added > 0) and iteration_num < current_max_iterations:
-            iteration_num += 1
-            
-            # Determine iteration type based on refinement flag
-            iteration_type = "Refinement Pass" if should_refine else "Initial Analysis"
-            
-            print(f"\n{'='*70}")
-            print(f"ITERATION {iteration_num} ({iteration_type})")
-            print(f"{'='*70}")
-            changed, new_sections_added = self.run_analysis_iteration(refine=should_refine)
-            
-            # If new sections were added, reset refinement flag for next iteration
-            # so new sections get an initial analysis pass
-            if new_sections_added > 0:
-                should_refine = False
-                current_max_iterations = iteration_num + base_max_iterations
-                print(f"  Extended max_iterations to {current_max_iterations} to accommodate {new_sections_added} new section(s)")
-                print(f"  Next iteration will be Initial Analysis for newly added sections")
-            else:
-                # After processing current iteration, next should be refinement
-                should_refine = True
-            
-            # Update progress after each iteration
-            progress["analysis_iterations_completed"] = iteration_num
-            self.question_object["progress"] = progress
-            self._save_question_object()
+        # --- Helper: gate and add facts, return list of contributed fact IDs ---
+        # Accept → new fact ID; merge → existing fact ID. Empty list if nothing accepted.
+        # question_context: sub-question or circle-back context under which facts were extracted;
+        # passed to the gate so facts can be evaluated against the specific question that
+        # prompted their extraction rather than always against the primary question alone.
+        # question_rationale: when question_context is a real sub-question (not a circle-back),
+        # this is the proposer's stated reason the sub-question's answer would matter to the
+        # primary question. The gate uses it as a bridge: facts must help answer the sub-question
+        # AND, via the rationale, plausibly affect the primary answer.
+        def _gate_facts(
+            proposed: List[str],
+            source_label: str,
+            question_context: Optional[str] = None,
+            question_rationale: Optional[str] = None,
+        ) -> List[str]:
+            contributed: List[str] = []
+            for fact_content in proposed:
+                verdict = _gate_and_merge_fact(
+                    scratch_manager, fact_gate_client, self._config, self.logfile,
+                    self.question_text, fact_content, source_label,
+                    question_context=question_context,
+                    close_match_client=fact_close_match_client,
+                    question_rationale=question_rationale,
+                )
+                if verdict["verdict"] == "accept":
+                    fact_id = scratch_manager.add_fact(fact_content, source_label)
+                    contributed.append(fact_id)
+                elif verdict["verdict"] == "merge" and verdict.get("merge_fact_id"):
+                    scratch_manager.merge_fact(
+                        verdict["merge_fact_id"],
+                        source_label,
+                        updated_content=verdict.get("merged_content"),
+                    )
+                    contributed.append(verdict["merge_fact_id"])
+            return contributed
 
-            # Report progress if callback provided
-            if self.progress_callback:
-                self.progress_callback('iterative_analysis', 'processing', iteration_num, current_max_iterations)
+        # --- Helper: add approved section requests to unit_queue ---
+        def _enqueue_section_requests(pending_requests: List[Dict[str, Any]]) -> int:
+            if not pending_requests:
+                return 0
 
-        if not changed and new_sections_added == 0:
-            print(f"\nAnalysis converged after {iteration_num} iteration(s) - no new changes detected.")
-        elif iteration_num >= current_max_iterations:
-            print(f"\nCompleted maximum {current_max_iterations} iteration(s).")
+            param_pointer = self.parsed_content.get("document_information", {}).get("parameters", {})
+            scores = self.question_object.setdefault("scores", {})
+            new_count = 0
 
-        # Step 3: Analyze zero-score sections if enabled and no high-relevance sections found
-        if self.mode_config.get("analyze_zero_score_sections", False):
-            zero_score_added = self._analyze_zero_score_sections()
+            for req in pending_requests:
+                target_type = req["target_type"].strip()
+                target_number = req["target_number"].strip()
+                if not target_type or not target_number:
+                    continue
 
-            # If zero-score analysis added sections, run additional iterations to analyze them
-            if zero_score_added > 0 and iteration_num < current_max_iterations:
-                print(f"Running additional iteration(s) to analyze {zero_score_added} fallback section(s)...")
-                # Extend max iterations to allow for analysis of newly added sections
-                current_max_iterations = iteration_num + base_max_iterations
-                should_refine = False  # Start with initial analysis for new sections
-
-                while iteration_num < current_max_iterations:
-                    iteration_num += 1
-
-                    iteration_type = "Refinement Pass" if should_refine else "Initial Analysis"
-                    print(f"\n{'='*70}")
-                    print(f"ITERATION {iteration_num} ({iteration_type})")
-                    print(f"{'='*70}")
-                    changed, new_sections_added = self.run_analysis_iteration(refine=should_refine)
-
-                    # Update progress after each iteration
-                    progress["analysis_iterations_completed"] = iteration_num
-                    self.question_object["progress"] = progress
-                    self._save_question_object()
-
-                    # Report progress if callback provided
-                    if self.progress_callback:
-                        self.progress_callback('iterative_analysis', 'processing', iteration_num, current_max_iterations)
-
-                    # Check convergence
-                    if not changed and new_sections_added == 0:
-                        print(f"\nAnalysis converged after {iteration_num} iteration(s).")
+                item_type_key = None
+                item_type_name_found = None
+                item_type_names = None
+                for pk, pd in param_pointer.items():
+                    if not isinstance(pd, dict):
+                        continue
+                    if not (pd.get("operational") == 1 and pd.get("name")):
+                        continue
+                    if pd["name"].lower() == target_type.lower():
+                        item_type_key = pk
+                        item_type_name_found = pd["name"]
+                        item_type_names = pd.get("name_plural", "")
                         break
 
-                    # After processing current iteration, next should be refinement
-                    should_refine = True
+                if not item_type_key or not item_type_names:
+                    continue
 
-    def _analyze_zero_score_sections(self) -> int:
-        """
-        Analyze sections that scored 0 if no high-relevance sections were found.
-        This is a fallback mechanism for when initial scoring may have missed relevant content.
+                working_item = lookup_item(self.parsed_content, item_type_names, target_number)
+                if working_item is None:
+                    # Try cross-doc
+                    for ext_file, ext_doc in self._external_documents.items():
+                        if lookup_item(ext_doc, item_type_names, target_number) is not None:
+                            if self._add_cross_doc_unit(ext_file, target_type.lower(), target_number):
+                                # Rebuild cross-doc unit_info and enqueue
+                                ext_label = os.path.basename(ext_file).replace("_processed.json", "")
+                                ext_params = ext_doc.get("document_information", {}).get("parameters", {})
+                                for _pk, _pd in ext_params.items():
+                                    if isinstance(_pd, dict) and _pd.get("name", "").lower() == target_type.lower():
+                                        item_type_names = _pd.get("name_plural", target_type + "s")
+                                        break
+                                wi = lookup_item(ext_doc, item_type_names, target_number)
+                                if wi:
+                                    candidate_label = f"{target_type.capitalize()} {target_number}"
+                                    full_label_ext = ScratchDocumentManager(
+                                        self.question_object, source_doc_label=ext_label
+                                    )._label(candidate_label)
+                                    if full_label_ext not in active_unit_labels and not any(
+                                        _unit_label(u) == full_label_ext for u in unit_queue
+                                    ):
+                                        new_ui = {
+                                            "unit_id": target_number,
+                                            "unit_label": candidate_label,
+                                            "type_name": target_type,
+                                            "type_names": item_type_names,
+                                            "type_key": target_type.lower(),
+                                            "score": 2,
+                                            "working_item": wi,
+                                            "parsed_content": ext_doc,
+                                            "external_doc_label": ext_label,
+                                            "parent_parsed_content": None,
+                                        }
+                                        unit_queue.append(new_ui)
+                                        new_count += 1
+                                        print(f"  Section request (cross-doc): queued {target_type} {target_number} from {ext_label}")
+                            break
+                    continue
 
-        Returns:
-            Number of zero-score sections added for analysis
-        """
-        scores = self.question_object.get("scores", {})
+                # Check not already active or already queued
+                candidate_label = f"{item_type_name_found.capitalize()} {target_number}"
+                if candidate_label in active_unit_labels:
+                    continue
+                if any(u["unit_label"] == candidate_label and u["external_doc_label"] is None
+                       for u in unit_queue):
+                    continue
 
-        # Check if we have any high-relevance sections (score >= 2)
-        has_high_relevance = False
-        for item_type in scores:
-            for item_num, score in scores[item_type].items():
-                if score >= 2:
-                    has_high_relevance = True
-                    break
-            if has_high_relevance:
+                # Update scores so the unit is visible in future _build_active_pool calls
+                type_scores = scores.setdefault(str(item_type_key), {})
+                if target_number not in type_scores or type_scores[target_number] < 2:
+                    type_scores[target_number] = 2
+
+                new_ui = {
+                    "unit_id": target_number,
+                    "unit_label": candidate_label,
+                    "type_name": item_type_name_found,
+                    "type_names": item_type_names,
+                    "type_key": str(item_type_key),
+                    "score": 2,
+                    "working_item": working_item,
+                    "parsed_content": self.parsed_content,
+                    "external_doc_label": None,
+                    "parent_parsed_content": getattr(self, "_parent_parsed_content", None),
+                }
+                unit_queue.append(new_ui)
+                new_count += 1
+                print(f"  Section request: queued {target_type} {target_number}")
+
+            if new_count:
+                self._save_question_object()
+            return new_count
+
+        # --- Helper: gate proposed section requests and enqueue approved ones ---
+        def _gate_and_enqueue_requests(
+            proposed_requests: List[Dict[str, Any]],
+            source_label: str,
+            source_parsed_content: Dict[str, Any],
+        ) -> None:
+            pending = []
+            for req in proposed_requests:
+                target_type = str(req.get("type", "")).strip()
+                target_number = str(req.get("number", "")).strip()
+                if not target_type or not target_number:
+                    continue
+                reason = str(req.get("reason", "")).strip()
+                verdict = _gate_section_request(
+                    scratch_manager, request_gate_client, self._config, self.logfile,
+                    self.question_text, target_type, target_number, reason, source_label,
+                    primary_parsed_content=self.parsed_content,
+                    external_documents=self._external_documents,
+                    primary_doc_label=None,
+                )
+                if verdict["verdict"] == "accept":
+                    pending.append({
+                        "target_type": target_type,
+                        "target_number": target_number,
+                        "reason": reason,
+                        "source_unit": source_label,
+                        "source_parsed_content": source_parsed_content,
+                    })
+            _enqueue_section_requests(pending)
+
+        # --- Helper: run Phase 1 for one unit ---
+        def _do_phase1(unit_info: Dict[str, Any]) -> int:
+            label = _unit_label(unit_info)
+            chunk_analyzer = self._make_chunk_analyzer_for_unit(
+                unit_info, scratch_manager, phase1_client
+            )
+            proposed_facts, proposed_requests = chunk_analyzer.analyze_phase1(
+                unit_info["working_item"],
+                unit_info["type_name"],
+                unit_info["unit_id"],
+                score_level=unit_info["score"],
+            )
+            contributed = _gate_facts(proposed_facts, label)
+            if contributed:
+                print(f"    [P1] {label}: {len(contributed)} fact(s) accepted")
+                self._save_question_object()
+            _gate_and_enqueue_requests(proposed_requests, label, unit_info["parsed_content"])
+            return len(contributed)
+
+        # --- Helper: run Phase 2 for one unit ---
+        def _do_phase2(unit_info: Dict[str, Any]) -> None:
+            label = _unit_label(unit_info)
+            chunk_analyzer = self._make_chunk_analyzer_for_unit(
+                unit_info, scratch_manager, phase2_client
+            )
+            proposed_questions, proposed_requests = chunk_analyzer.analyze_phase2(
+                unit_info["working_item"],
+                unit_info["type_name"],
+                unit_info["unit_id"],
+            )
+
+            accepted_q = 0
+            for q_text, q_rationale in proposed_questions:
+                verdict = _gate_question(
+                    scratch_manager, question_gate_client, self._config, self.logfile,
+                    self.question_text, q_text, label, rationale=q_rationale,
+                    close_match_client=question_close_match_client,
+                )
+                if verdict["verdict"] == "accept":
+                    q_id = scratch_manager.add_question(q_text, label, rationale=q_rationale)
+                    question_queue.append(q_id)
+                    accepted_q += 1
+                elif verdict["verdict"] == "merge" and verdict.get("merge_question_id"):
+                    scratch_manager.merge_question(verdict["merge_question_id"], label)
+
+            if accepted_q:
+                print(f"    [P2] {label}: {accepted_q} question(s) accepted")
+                self._save_question_object()
+
+            _gate_and_enqueue_requests(proposed_requests, label, unit_info["parsed_content"])
+
+        # --- Helper: run Phase 3 for one unit × one question ---
+        def _do_phase3(unit_info: Dict[str, Any], q_id: str, q_text: str) -> int:
+            label = _unit_label(unit_info)
+            scratch_manager.mark_question_seen(q_id, label)
+            # Fetch the sub-question's stored rationale so the fact gate can apply
+            # the rationale-bridge criterion (task 8.R8).
+            q_obj = next((x for x in scratch_manager.questions if x["id"] == q_id), None)
+            q_rationale = q_obj.get("rationale") if q_obj else None
+            chunk_analyzer = self._make_chunk_analyzer_for_unit(
+                unit_info, scratch_manager, phase1_client  # Phase 3 reuses phase1 client
+            )
+            proposed_facts, proposed_requests = chunk_analyzer.analyze_phase1(
+                unit_info["working_item"],
+                unit_info["type_name"],
+                unit_info["unit_id"],
+                score_level=unit_info["score"],
+                sub_question=q_text,
+            )
+            contributed = _gate_facts(
+                proposed_facts, label,
+                question_context=q_text,
+                question_rationale=q_rationale,
+            )
+            if contributed:
+                q = next((x for x in scratch_manager.questions if x["id"] == q_id), None)
+                if q is not None:
+                    q.setdefault("supporting_fact_ids", []).extend(contributed)
+                print(f"    [P3] {label} × {q_id}: {len(contributed)} fact(s)")
+                self._save_question_object()
+            _gate_and_enqueue_requests(proposed_requests, label, unit_info["parsed_content"])
+            return len(contributed)
+
+        # --- Helper: run circle-back for one unit × one answered question ---
+        def _do_circleback(unit_info: Dict[str, Any], q: Dict[str, Any]) -> int:
+            """Feed responsive facts back to a question's proposer for follow-up extraction."""
+            label = _unit_label(unit_info)
+            q_id = q["id"]
+            unit_info.setdefault("circleback_done", set()).add(q_id)
+
+            # Build the circleback context block shown to the analyst
+            responsive_facts = [
+                f for f in scratch_manager.facts
+                if f["id"] in q.get("supporting_fact_ids", [])
+            ]
+            if not responsive_facts:
+                return 0
+
+            fact_lines = "\n".join(
+                f"  [{f['id']}] {f['content']}" for f in responsive_facts
+            )
+            rationale_line = (
+                f"Your rationale for asking: {q['rationale']}\n" if q.get("rationale") else ""
+            )
+            circleback_context = (
+                f"ANSWERED SUB-QUESTION\n"
+                f"{'=' * 50}\n"
+                f"Sub-question: {q['text']}\n"
+                f"{rationale_line}"
+                f"Facts found in response:\n{fact_lines}\n"
+                f"{'=' * 50}\n\n"
+                f"Given the above answered sub-question, extract any additional facts from "
+                f"your portion that are now relevant to the primary question.\n"
+            )
+
+            chunk_analyzer = self._make_chunk_analyzer_for_unit(
+                unit_info, scratch_manager, phase1_client
+            )
+            proposed_facts, proposed_requests = chunk_analyzer.analyze_phase1(
+                unit_info["working_item"],
+                unit_info["type_name"],
+                unit_info["unit_id"],
+                score_level=unit_info["score"],
+                circleback_context=circleback_context,
+            )
+            cb_gate_context = f"Follow-up after answered sub-question: {q['text']}"
+            contributed = _gate_facts(
+                proposed_facts, label,
+                question_context=cb_gate_context,
+                question_rationale=q.get("rationale"),
+            )
+            if contributed:
+                print(f"    [CB] {label} ← {q_id}: {len(contributed)} new fact(s)")
+                self._save_question_object()
+            _gate_and_enqueue_requests(proposed_requests, label, unit_info["parsed_content"])
+            return len(contributed)
+
+        # --- Helper: close a question if conditions are met ---
+        def _maybe_close_question(q_id: str) -> None:
+            if unit_queue:
+                return  # New units may still appear
+            q = next((x for x in scratch_manager.questions if x["id"] == q_id), None)
+            if not q or q["status"] != "open":
+                return
+            seen_by = set(q.get("seen_by", []))
+            if not active_unit_labels.issubset(seen_by):
+                return
+            has_facts = bool(q.get("supporting_fact_ids"))
+            q["status"] = "answered" if has_facts else "unanswerable"
+            print(f"  Question {q_id} closed: {q['status']}")
+            self._save_question_object()
+
+            # Enqueue circle-backs for original proposers if the question was answered
+            # and is not a derived question (depth 0 only, to prevent cascades)
+            if q["status"] == "answered" and q.get("derivation_depth", 0) == 0:
+                for unit_info in active_units:
+                    label = _unit_label(unit_info)
+                    if label in q.get("proposed_by", []):
+                        done = unit_info.get("circleback_done", set())
+                        if q_id not in done:
+                            circleback_queue.append((unit_info, q))
+
+        # --- Main loop ---
+        while (unit_queue
+               or any(q["status"] == "open" for q in scratch_manager.questions)
+               or circleback_queue):
+            if unit_queue:
+                unit_info = unit_queue.popleft()
+                label = _unit_label(unit_info)
+                print(f"\n  Processing: {label}")
+
+                # Phase 1: fact extraction
+                _do_phase1(unit_info)
+
+                # Phase 2: question + request generation
+                _do_phase2(unit_info)
+
+                # Register unit as active
+                active_units.append(unit_info)
+                active_unit_labels.add(label)
+
+                # Phase 3 inline: ask new unit about all currently-open questions
+                open_qs = scratch_manager.get_open_questions()
+                if open_qs:
+                    print(f"  [P3 inline] {label}: {len(open_qs)} open question(s)...")
+                    for q in open_qs:
+                        if label not in q.get("seen_by", []):
+                            _do_phase3(unit_info, q["id"], q["text"])
+
+            elif question_queue:
+                # Unit queue empty — drain question queue
+                q_id = question_queue.popleft()
+                q = next((x for x in scratch_manager.questions if x["id"] == q_id), None)
+                if not q or q["status"] != "open":
+                    continue
+
+                print(f"\n  [P3 queue] {q_id}: {q['text'][:60]}...")
+                seen_by = set(q.get("seen_by", []))
+                unseen = [u for u in active_units if _unit_label(u) not in seen_by]
+                for unit_info in unseen:
+                    _do_phase3(unit_info, q_id, q["text"])
+
+                _maybe_close_question(q_id)
+
+            elif circleback_queue:
+                # Question and unit queues empty — drain circle-back queue
+                unit_info, q = circleback_queue.popleft()
+                label = _unit_label(unit_info)
+                print(f"\n  [CB] {label} ← {q['id']} (circle-back)")
+                _do_circleback(unit_info, q)
+
+            else:
                 break
 
-        if has_high_relevance:
-            # We have high-relevance sections, no need to analyze zero-score sections
-            return 0
+        # Close any remaining open questions
+        for q in scratch_manager.questions:
+            if q["status"] == "open":
+                has_facts = bool(q.get("supporting_fact_ids"))
+                q["status"] = "answered" if has_facts else "unanswerable"
 
-        print(f"\n{'='*70}")
-        print("ZERO-SCORE SECTION ANALYSIS (Fallback)")
-        print(f"{'='*70}")
-        print("No high-relevance sections found. Analyzing zero-score sections as fallback...")
+        unanswerable = [q for q in scratch_manager.questions if q["status"] == "unanswerable"]
+        scratch_manager.scratch["unresolved_questions"] = [
+            {"id": q["id"], "text": q["text"]} for q in unanswerable
+        ]
 
-        if (
-            "document_information" not in self.parsed_content
-            or "parameters" not in self.parsed_content["document_information"]
-            or "content" not in self.parsed_content
-        ):
-            return 0
-        
-        param_pointer = self.parsed_content["document_information"]["parameters"]
-        content_pointer = self.parsed_content["content"]
-        
-        # Find all zero-score sections and add them with score 1 (possibly relevant)
-        # so they get analyzed in the next iteration
-        zero_score_count = 0
-        for item_type in param_pointer:
-            p = param_pointer[item_type]
-            if not (p.get("operational") == 1 and "name" in p and "name_plural" in p):
-                continue
-            # Skip sub-unit types — they are added via container expansion below
-            if p.get("is_sub_unit", False):
-                continue
-            item_type_names = p["name_plural"]
-            if item_type_names not in content_pointer:
-                continue
-            if item_type not in scores:
-                scores[item_type] = {}
+        if unanswerable:
+            print(f"\n  {len(unanswerable)} question(s) unanswerable — flagged for final answer.")
 
-            for item_num, item_data in content_pointer[item_type_names].items():
-                # Container expansion: add all text-bearing sub-units and, when the
-                # parent itself has prose text, the parent too.
-                if has_sub_units(item_data):
-                    for sub_type_key_str, _, sub_num, sub_data in _iter_text_bearing_sub_units(param_pointer, item_data):
-                        if sub_type_key_str not in scores:
-                            scores[sub_type_key_str] = {}
-                        if sub_num in scores[sub_type_key_str] and scores[sub_type_key_str][sub_num] != 0:
-                            continue
-                        if "summary_1" not in sub_data and "summary_2" not in sub_data:
-                            continue
-                        scores[sub_type_key_str][sub_num] = 1
-                        zero_score_count += 1
-
-                    # Also add the parent when it has prose text of its own.
-                    if item_data.get("text"):
-                        if item_num not in scores[item_type] or scores[item_type][item_num] == 0:
-                            if "summary_1" in item_data or "summary_2" in item_data:
-                                scores[item_type][item_num] = 1
-                                zero_score_count += 1
-
-                    continue  # done with container
-
-                # Only process sections that scored 0
-                if item_num in scores[item_type] and scores[item_type][item_num] != 0:
-                    continue
-
-                # Check if section has summaries (required for analysis)
-                if "summary_1" not in item_data and "summary_2" not in item_data:
-                    continue
-
-                # Add with score 1 to trigger analysis
-                scores[item_type][item_num] = 1
-                zero_score_count += 1
-        
-        if zero_score_count > 0:
-            self.question_object["scores"] = scores
-            self._save_question_object()
-            print(f"  Added {zero_score_count} zero-score section(s) for fallback analysis")
-        else:
-            print("  No zero-score sections found to analyze")
-
-        return zero_score_count
-
-    # ------------------------------------------------------------------
-    # Cleanup and final answer
-    # ------------------------------------------------------------------
-
-    def cleanup_scratch_and_answer(self) -> None:
-        """
-        Run a dedicated cleanup pass over the full scratch document to
-        propose a pruned scratch and optionally a refined working answer.
-        """
-        # Check if cleanup is already complete (idempotency)
-        progress = self.question_object.get("progress", {})
-        if progress.get("cleanup_complete", False):
-            print(f"\n{'='*70}")
-            print("CLEANUP PHASE")
-            print(f"{'='*70}")
-            print("Cleanup already complete, skipping...")
-            return
-        
-        print(f"\n{'='*70}")
-        print("CLEANUP PHASE")
-        print(f"{'='*70}")
-
-        scratch = self.question_object.get("scratch", {})
-        facts_before = len(scratch.get("fact", {}))
-        questions_before = len(scratch.get("question", {}))
-        requests_before = len(scratch.get("requests", {}))
-
-        print(f"Before cleanup: {facts_before} facts, {questions_before} questions, {requests_before} detail requests")
-        print("Running cleanup and consolidation...")
-
-        scratch_json = json.dumps(scratch, indent=4)
-
-        prompt = []
-        prompt.append(
-            "You are a senior legal analyst reviewing a collaborative Scratch "
-            "Document that multiple analysts have contributed to while analyzing "
-            "a long legal document.\n\n"
-        )
-        prompt.append(
-            "The goal is to clean up the Scratch Document so that it only contains "
-            "useful, non-duplicative, and reasonably concise facts, questions, "
-            "answers, and detail requests that are important for answering the "
-            "Primary Question.\n\n"
-        )
-        prompt.append(
-            "Context: This Scratch Document was built collaboratively by multiple AI analysts, "
-            "each analyzing different substantive units (sections, articles, etc.) of the legal "
-            "document. Each analyst contributed facts, questions, and answers based on their "
-            "assigned portion. As a result, you may find:\n"
-            "- Duplicate or highly similar facts from different analysts who found the same information\n"
-            "- Related facts that could be consolidated\n"
-            "- Questions that have been answered or are no longer relevant\n\n"
-        )
-        prompt.append("Primary Question:\n")
-        prompt.append(self.question_text + "\n\n")
-        prompt.append("Current Scratch Document (JSON):\n")
-        prompt.append(scratch_json + "\n\n")
-        prompt.append(
-            "Return a single JSON object with the following structure:\n"
-            "{\n"
-            '  "scratch": { ... cleaned scratch JSON ... },\n'
-            '  "working_answer": {\n'
-            '    "text": "Optional draft answer text, or empty string if you do not '
-            'wish to propose one yet."\n'
-            "  }\n"
-            "}\n\n"
-        )
-        prompt.append(
-            "Rules for cleanup:\n"
-            "- Preserve clearly relevant, non-duplicative items.\n"
-            "- CONSOLIDATE duplicative or highly similar entries: When you find facts, questions, "
-            "or answers that are substantially the same, merge them into a single entry. When "
-            "consolidating, combine the source lists from all merged entries so that the consolidated "
-            "entry's source field contains all substantive units that contributed to it.\n"
-            "  Example: If fact_001 (source: [\"Section 5\"]) and fact_003 (source: [\"Article 12\"]) "
-            "convey the same information, merge them into one fact with source: [\"Section 5\", \"Article 12\"].\n"
-            "- Merge or drop only entries that are irrelevant to the Primary Question, or are obviously redundant or trivial.\n"
-            "- Do not introduce new facts that are not already in the scratch.\n"
-            "- If you modify the working_answer.text, base it only on content already "
-            "in the scratch.\n"
-        )
-
-        full_prompt = "".join(prompt)
-
-        # Cleanup needs a large token limit because it must return the entire scratch document
-        # Estimate needed: ~150 tokens per fact/question + overhead
-        # For safety, use 32000 tokens (supports ~200 facts comfortably)
-        cleanup_max_tokens = 32000
-
-        client = self._get_client_for_phase('cleanup')
-        result = query_json(client, [], full_prompt, self.logfile, max_tokens=cleanup_max_tokens)
-
-        if not isinstance(result, dict):
-            raise ModelError("cleanup_scratch_and_answer: model did not return an object.")
-
-        new_scratch = result.get("scratch")
-        if isinstance(new_scratch, dict):
-            self.question_object["scratch"] = new_scratch
-
-        wa = result.get("working_answer", {})
-        if isinstance(wa, dict) and "text" in wa:
-            self.question_object["working_answer"]["text"] = str(wa["text"])
-
-        # Mark cleanup as complete (idempotency)
-        progress = self.question_object.get("progress", {})
-        progress["cleanup_complete"] = True
-        self.question_object["progress"] = progress
-        
+        print(f"\n  Analysis complete: {scratch_manager.fact_count} fact(s), "
+              f"{len(scratch_manager.questions)} question(s)")
         self._save_question_object()
 
-        # Show cleanup results
-        facts_after = len(new_scratch.get("fact", {})) if isinstance(new_scratch, dict) else facts_before
-        questions_after = len(new_scratch.get("question", {})) if isinstance(new_scratch, dict) else questions_before
-        requests_after = len(new_scratch.get("requests", {})) if isinstance(new_scratch, dict) else requests_before
-
-        print(f"After cleanup: {facts_after} facts, {questions_after} questions, {requests_after} detail requests")
-        if facts_after < facts_before or questions_after < questions_before or requests_after < requests_before:
-            print(f"Removed: {facts_before - facts_after} facts, {questions_before - questions_after} questions, {requests_before - requests_after} detail requests")
+    # Alias for backwards compatibility with callers
+    def run_to_stability(self, base_max_iterations: int = None) -> None:
+        """Deprecated: use run_analysis(). Retained for caller compatibility."""
+        self.run_analysis()
 
     def generate_final_answer(self) -> None:
         """
@@ -3698,7 +4066,32 @@ class QuestionProcessor:
         print("Synthesizing final answer from scratch document...")
 
         scratch = self.question_object.get("scratch", {})
-        scratch_text = json.dumps(scratch, indent=4)
+
+        # Build a clean, structured prompt from the fact pool and question statuses
+        facts = scratch.get("facts", [])
+        questions = scratch.get("questions", [])
+        unresolved = scratch.get("unresolved_questions", [])
+
+        fact_lines = []
+        for f in facts:
+            sources = ", ".join(f.get("source_units", []))
+            fact_lines.append(f"- {f['content']}  [sources: {sources}]")
+        facts_block = "\n".join(fact_lines) if fact_lines else "(No facts collected.)"
+
+        closed_qs = [q for q in questions if q["status"] in ("answered", "unanswerable")]
+        q_lines = []
+        for q in closed_qs:
+            status_str = "ANSWERED" if q["status"] == "answered" else "UNANSWERABLE"
+            q_lines.append(f"- [{status_str}] {q['text']}")
+        questions_block = "\n".join(q_lines) if q_lines else "(No sub-questions were generated.)"
+
+        unresolved_block = ""
+        if unresolved:
+            ur_lines = [f"- {u['text']}" for u in unresolved]
+            unresolved_block = (
+                "\nUnanswerable Questions (asked but no information found):\n"
+                + "\n".join(ur_lines) + "\n"
+            )
 
         prompt = []
         prompt.append(
@@ -3706,40 +4099,37 @@ class QuestionProcessor:
             "legal documents. Using only the information provided below, answer the question.\n\n"
         )
         prompt.append(
-            "Background: Multiple AI analysts have reviewed different portions (sections, articles, etc.) "
-            "of one or more legal documents to extract relevant information. The findings below represent "
-            "their collective analysis, with each entry including source information indicating which portion "
-            "of which document contributed that information. Sources from the primary document appear as "
-            "\"Section 5\" or \"Article 12\". Sources from cross-referenced external documents appear with "
-            "a parenthetical document identifier, e.g., \"Section 744.17 (Part744)\" or "
-            "\"Eccn 3A090 (Part774)\".\n\n"
+            "Background: Multiple AI analysts reviewed different sections of one or more legal documents "
+            "and extracted the facts below. Each fact includes source information (the section or article "
+            "it came from). Sources from the primary document appear as \"Section 5\" or \"Article 12\". "
+            "Sources from cross-referenced external documents appear with a parenthetical document name, "
+            "e.g., \"Section 744.17 (Part744)\".\n\n"
         )
-        prompt.append("Question:\n")
-        prompt.append(self.question_text + "\n\n")
-        prompt.append("Findings from Document Analysis:\n")
-        prompt.append(scratch_text + "\n\n")
+        prompt.append(f"Question:\n{self.question_text}\n\n")
+        prompt.append(f"Collected Facts:\n{facts_block}\n\n")
+        prompt.append(f"Sub-Questions Explored:\n{questions_block}\n")
+        if unresolved_block:
+            prompt.append(unresolved_block)
+        prompt.append("\n")
         prompt.append(
             "Instructions:\n"
+            "- ANSWER THE QUESTION AS POSED: The opening of your answer must directly "
+            "address the question as written, not a broader or related one. For yes/no "
+            "questions, lead with a yes or no that is consistent with the substance that "
+            "follows.\n"
             "- Provide a clear, comprehensive answer suitable for a legal practitioner.\n"
-            "- CRITICAL - CITE DOCUMENT SOURCES: When making claims or statements, you MUST reference "
-            "the specific substantive units (e.g., \"Section 5\", \"Article 12\", \"Chapter 3\") where "
-            "that information is found. Each fact or answer entry in the findings above includes a \"source\" "
-            "field showing which document units contributed that information. Use these source labels in your "
-            "answer. You may reference multiple units when information comes from multiple sources.\n"
+            "- CITE DOCUMENT SOURCES: When making claims, reference the specific section or article "
+            "(from the source labels in the facts list). You may cite multiple sources when relevant.\n"
             "- CROSS-DOCUMENT CITATIONS: When a source label includes a parenthetical document name "
-            "(e.g., \"Section 3A090 (Part774)\"), include the document name in your citation "
-            "(e.g., \"Part 774, ECCN 3A090\"). This indicates the information comes from a "
-            "cross-referenced external document rather than the primary document being analyzed.\n"
-            "- DO NOT reference internal working document identifiers like \"fact_1\", \"answer_2\", or "
-            "\"question_3\". These are internal tracking IDs. ONLY reference the substantive units "
-            "(Sections, Articles, Chapters, etc.) from the \"source\" fields.\n"
-            "- DO NOT mention the analysis process, analysts, or working documents in your answer. "
+            "(e.g., \"Section 3A090 (Part774)\"), include the document name in your citation.\n"
+            "- Do NOT mention internal IDs (f001, q001, etc.). Only cite substantive units "
+            "(Sections, Articles, Chapters, etc.).\n"
+            "- If there are unanswerable questions that materially affect the answer, acknowledge "
+            "those limitations explicitly.\n"
+            "- Do NOT mention analysts, analysis processes, or working documents. "
             "Write as if you are directly interpreting the legal documents.\n"
-            "- Address uncertainties: If the analysis includes unresolved questions that could materially "
-            "affect the answer, acknowledge these limitations. Explain what information is uncertain and "
-            "why it matters, so the reader understands the scope of the analysis.\n"
-            "- If the available information is insufficient to fully answer the question, explain "
-            "what is known and what remains uncertain.\n"
+            "- If the information is insufficient to fully answer the question, explain what is "
+            "known and what remains uncertain.\n"
         )
 
         full_prompt = "".join(prompt)
@@ -3760,7 +4150,7 @@ class QuestionProcessor:
                 max_tokens=final_answer_max_tokens,
                 max_retries=3,
                 config=self._config,
-                task_name='qa.final_answer'
+                task_name='qa.synthesis.final_answer'
             )
         except ModelError as e:
             raise ModelError(f"generate_final_answer: Failed to generate final answer after retries: {e}")
@@ -3844,24 +4234,15 @@ class QuestionProcessor:
         scratch = self.question_object.get("scratch", {})
         source_units = set()
 
-        # Extract sources from facts
-        facts = scratch.get("fact", {})
-        for fact_id, fact_data in facts.items():
-            sources = fact_data.get("source", [])
-            if isinstance(sources, list):
-                for source_str in sources:
-                    # Parse source strings like "Section 5", "Article 12", etc.
-                    source_units.add(source_str)
+        # Extract sources from facts (WS8 schema: facts is a list)
+        for fact_data in scratch.get("facts", []):
+            for source_str in fact_data.get("source_units", []):
+                source_units.add(source_str)
 
-        # Extract sources from question answers
-        questions = scratch.get("question", {})
-        for q_id, q_data in questions.items():
-            answers = q_data.get("answers", {})
-            for a_id, a_data in answers.items():
-                sources = a_data.get("source", [])
-                if isinstance(sources, list):
-                    for source_str in sources:
-                        source_units.add(source_str)
+        # Extract sources from question answers (WS8 schema: questions is a list)
+        for q_data in scratch.get("questions", []):
+            for a_data in q_data.get("answers", []):
+                source_units.add(a_data.get("unit_id", ""))
 
         if not source_units:
             print("No source units found in scratch document, skipping quality check...")
@@ -4226,6 +4607,10 @@ class QuestionProcessor:
         prompt.append(scratch_text + "\n\n")
         prompt.append(
             "Instructions:\n"
+            "- ANSWER THE QUESTION AS POSED: The opening of your answer must directly "
+            "address the question as written, not a broader or related one. For yes/no "
+            "questions, lead with a yes or no that is consistent with the substance that "
+            "follows.\n"
             "- Provide a clear, comprehensive answer suitable for a legal practitioner.\n"
             "- CRITICAL - ADDRESS QUALITY CONCERNS: Your answer must correct the issues identified above. "
             "Ensure your statements are consistent with the source units and do not contain the errors flagged.\n"
@@ -4666,15 +5051,11 @@ Examples:
         
         return 0
 
-    # Phase 2: iterative analysis to fill scratch
+    # Phase 2: WS8 queue-driven analysis (Phase 1 → 2 → Phase 3 inline)
     print("Running iterative analysis to populate scratch document...")
-    qp.run_to_stability(base_max_iterations=None)  # Uses mode_config["max_analysis_passes"]
+    qp.run_analysis()
 
-    # Phase 3: cleanup scratch and optional working answer
-    print("Running scratch cleanup and answer proposal...")
-    qp.cleanup_scratch_and_answer()
-
-    # Phase 4: final answer
+    # Phase 3: final answer synthesis
     print("Generating final answer...")
     qp.generate_final_answer()
 

@@ -364,7 +364,7 @@ Helper functions (prefixed with `_`):
 - `_wrap_text()` - Word-wrap text avoiding mid-word breaks
 - `_assess_table_complexity()` - Detect tables that can't be reliably converted
 
-**Note:** Parsers currently preserve tables as processed HTML/XML with text transformations applied (fractions, superscripts, etc.). See `CFR_ECFR_PARSER_PLAN.md` for details on table handling in the CFR parser.
+**Note:** Parsers currently preserve tables as processed HTML/XML with text transformations applied (fractions, superscripts, etc.). See `LARGE_TABLE_HANDLING.md` for details on large table extraction as sub-units.
 
 **Definition Processing:**
 - `definition_helpers.py` - Scope resolution (unit matching, ranges, "current")
@@ -414,8 +414,8 @@ When units are chunked using breakpoints, locally scoped definitions must remain
 
 **Key Principles:**
 - **Keyhole context** reduces hallucination, improves focus
-- **Append-only** prevents discarding important information
-- **Separate cleanup phase** enables effective deduplication
+- **Role-separated analysis** keeps each analyst call focused on one job
+- **Gatekeeper review** controls which facts, questions, and section requests enter shared state
 - **Staged detail escalation** balances richness with efficiency
 - **Cache optimization** maximizes API cache hits
 
@@ -428,23 +428,18 @@ When units are chunked using breakpoints, locally scoped definitions must remain
    - Fallback re-scoring with summary_2 if no high-relevance units found
 
 2. **Iterative Analysis** (`run_to_stability()`)
-   - Analyzes units in priority order (score 3 → 2 → 1)
-   - Uses ChunkAnalyzer with escalation (summary_1 → summary_2)
-   - Skip list optimization avoids re-analyzing empty units
-   - Dynamic iteration extension when new sections added
-   - Zero-score fallback analysis when no high-relevance units found
+   - Builds an active pool from score-2/3 primary and cross-document units
+   - Runs WS8 rounds: Phase 1 fact extraction → Phase 2 question/request generation → Phase 3 answer collection
+   - Uses LLM gates for facts, questions, and section requests before adding them to shared state
+   - Dynamically extends when validated section requests add new units
+   - Flags exhausted-but-unanswered questions in `unresolved_questions`
 
-3. **Cleanup** (`cleanup_scratch_and_answer()`)
-   - Deduplicates facts and consolidates sources
-   - Drops irrelevant/trivial entries
-   - Optionally generates working answer proposal
-
-4. **Final Answer** (`generate_final_answer()`)
-   - Synthesizes answer from cleaned scratch document
+3. **Final Answer** (`generate_final_answer()`)
+   - Synthesizes answer from the WS8 scratch document
    - Includes source citations to substantive units
    - Preserves previous mode answers in history
 
-5. **Quality Check** (`quality_check_answer()`, `maximum_confidence` mode only)
+4. **Quality Check** (`quality_check_answer()`, `maximum_confidence` mode only)
    - Validates final answer against full text of source units
    - Parallel review: one analyst per substantive unit
    - Categorizes concerns: minor (appended) vs significant (regenerates)
@@ -544,10 +539,10 @@ Batch processing is implemented as a standalone script (`batch_process.py`) rath
 ## Current Limitations
 
 1. **California Parser** - HTML source; XML preferred (optional improvement)
-2. California Parser Features** - Notes/breakpoints not implemented (optional)
-3. **Question-Answering** - Single-document only (multi-document planned)
-4. **Detail Escalation** - Limited to summary_1 → summary_2 (full text escalation not yet implemented)
-5. **Testing** - Comprehensive end-to-end validation needed, especially for quality check phase
+2. **California Parser Features** - Notes/breakpoints not implemented (optional)
+3. **Detail Escalation** - Limited to summary_1 → summary_2 (full text escalation not yet implemented)
+4. **Non-Text Content** - MATH and IMG elements are currently omitted; AI-generated descriptions planned (Workstream 13)
+5. **Stage 4 Quality** - Fact churn and unfocused question accumulation in long documents; addressed by Workstream 8 redesign
 
 See [`PLANNED_ENHANCEMENTS.md`](PLANNED_ENHANCEMENTS.md) for planned improvements.
 

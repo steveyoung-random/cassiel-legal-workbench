@@ -29,15 +29,27 @@ model-aware rerun.
 
 ---
 
-### Image Processing in Documents
+### Non-Text Content Descriptions (Workstream 13)
 
 **Priority**: Low
 
-Legal documents sometimes contain diagrams, tables as images, or scanned
-inserts. Current parsers skip non-text content. A future enhancement could
-use OCR or vision-model extraction for embedded images. This requires a
-survey of how common this is across the four supported document types before
-committing to implementation.
+Legal documents sometimes contain embedded images and mathematical
+expressions. A corpus survey across all four supported document types found:
+
+- **MATH elements** (USLM): Appear in some USC titles (e.g., Title 26, the
+  Internal Revenue Code) as MathML markup. Currently emitted as
+  `[MATH content omitted]`.
+- **IMG elements** (CFR, USLM, Formex): Relatively uncommon; most CFR parts
+  have none. Where present, images are currently omitted.
+
+The planned enhancement adds AI-generated short descriptions at parse time.
+MATH elements would be described as mathematical expressions in plain language
+(e.g., `[Math: the present value formula PV = FV / (1 + r)^n]`). IMG elements
+would receive a brief visual description (e.g., `[Image: a diagram showing
+the flow of materials from supplier to manufacturer]`). These descriptions are
+stored directly in the parsed JSON as part of the parent unit's text, so
+downstream stages (definitions, summaries, Q&A) can reference them without
+any changes.
 
 ---
 
@@ -191,4 +203,4 @@ override functions but requires thorough testing with EU documents.
 
 ---
 
-*Last Updated: 2026-03-19*
+*Last Updated: 2026-04-19*

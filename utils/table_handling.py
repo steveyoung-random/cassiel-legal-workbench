@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 # Minimum number of <TR> tags for a TABLE to be extracted as a sub-unit.
-LARGE_TABLE_ROW_THRESHOLD = 50
+LARGE_TABLE_ROW_THRESHOLD = 30
 
 # Regex to find TABLE elements (non-greedy, handles attributes on opening tag).
 # Matches <TABLE ...> ... </TABLE> case-insensitively.

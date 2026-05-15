@@ -8,6 +8,7 @@ dist/
 build/
 *.egg
 .pytest_cache/
+.api_cache_tmp_*.json
 
 # Secrets
 api_keys.py
@@ -45,6 +46,7 @@ parsing_issues*.json
 
 #Other
 WORKSTREAM_8_PLAN.md
+EDGE_CASE_ANALYSIS.md
 TASK_4_CONTENT_REFRESH.md
 ECFR-XML-User-Guide.md
 STAGE3_CONTAINER_CONTEXT_FIX.md

@@ -20,7 +20,7 @@ The correct treatment — modeled on how figures are handled — is to extract l
 
 `tools/detect_long_units.py` reports `<TR>` count for large HTML tables.
 
-The pattern `HTML table rows` uses regex `<TR[\s>]` (case-insensitive). The threshold for this pattern is **50 rows** (not the default 5 used for other patterns). Units with ≥50 `<TR>` matches are flagged as candidates for extraction.
+The pattern `HTML table rows` uses regex `<TR[\s>]` (case-insensitive). The threshold for this pattern is **30 rows** (not the default 5 used for other patterns). Units with ≥30 `<TR>` matches are flagged as candidates for extraction.
 
 ---
 
@@ -86,7 +86,7 @@ Large tables in CFR XML exist as `GPOTABLE` or `TABLE` elements. The CFR parser 
 
 During the text-assembly loop, when a `GPOTABLE` or `TABLE` element is encountered:
 1. Row count is checked (`_count_xml_table_rows()`): `ROW` descendants for GPOTABLE, `TR` descendants for TABLE.
-2. If count ≥ `LARGE_TABLE_ROW_THRESHOLD` (50): the element is added to `pending_large_tables`; a placeholder `[Table N pending sub-unit extraction]` is added to `text_parts` instead.
+2. If count ≥ `LARGE_TABLE_ROW_THRESHOLD` (30): the element is added to `pending_large_tables`; a placeholder `[Table N pending sub-unit extraction]` is added to `text_parts` instead.
 3. If count < threshold: `extract_table_text()` is called as normal (table stays in parent text).
 
 After text assembly and after the CCL subdivision check, `pending_large_tables` is processed:
@@ -110,15 +110,15 @@ The `if pending_large_tables and not item_entry.get("sub_units"):` guard in `par
 
 ### XML-Level Interception (USLM)
 
-In `uslm_set_parse.py`, `get_element_text2()` accepts optional `pending_large_tables`. When processing a child with tag `table`, if row count (`.//tr`) ≥ 50, the element is appended to `pending_large_tables` and a placeholder is returned. `process_section_element()` passes the list, then registers sub-units after text assembly. Tables are serialized to HTML via lxml.
+In `uslm_set_parse.py`, `get_element_text2()` accepts optional `pending_large_tables`. When processing a child with tag `table`, if row count (`.//tr`) ≥ 30, the element is appended to `pending_large_tables` and a placeholder is returned. `process_section_element()` passes the list, then registers sub-units after text assembly. Tables are serialized to HTML via lxml.
 
 ### XML-Level Interception (Formex)
 
-In `formex_set_parse.py`, `get_element_text2()` accepts optional `pending_large_tables`. When processing a child with tag `TGROUP`, if row count (`.//ROW`) ≥ 50, the element is appended and a placeholder returned. `add_text_brkpts_notes()` passes the list; `extract_articles()` and `extract_annexes()` call `_register_pending_large_tables()` after building text. TGROUP is serialized as raw XML (like GPOTABLE).
+In `formex_set_parse.py`, `get_element_text2()` accepts optional `pending_large_tables`. When processing a child with tag `TGROUP`, if row count (`.//ROW`) ≥ 30, the element is appended and a placeholder returned. `add_text_brkpts_notes()` passes the list; `extract_articles()` and `extract_annexes()` call `_register_pending_large_tables()` after building text. TGROUP is serialized as raw XML (like GPOTABLE).
 
 ### DOM-Level Interception (CA / BeautifulSoup)
 
-In `CA_parse_set.py`, the section content loop iterates over `current_div.find_all(['p', 'table'])` in document order. For each `table` element, if `len(table.find_all('tr'))` ≥ 50, the table is added to `pending_large_tables` and a placeholder is appended. `_register_ca_large_tables()` serializes the table via `str(table_tag)` (HTML) and registers sub-units. Small tables use `html_table_to_plaintext()` inline.
+In `CA_parse_set.py`, the section content loop iterates over `current_div.find_all(['p', 'table'])` in document order. For each `table` element, if `len(table.find_all('tr'))` ≥ 30, the table is added to `pending_large_tables` and a placeholder is appended. `_register_ca_large_tables()` serializes the table via `str(table_tag)` (HTML) and registers sub-units. Small tables use `html_table_to_plaintext()` inline.
 
 ### Shared Helpers
 
@@ -155,7 +155,7 @@ The leaf summary loop in `level_1_summaries()` builds a set of data-table type n
 
 **Scoring**: `table` sub-units have `text = ""` but `summary_1` set. The existing scoring path in `score_relevance()` already fetches `summary_1` for scoring when `text` is empty — no change needed for scoring.
 
-**Analysis**: In `ChunkAnalyzer.analyze_chunks()`, if `text` is empty, the code checks whether the item type has `data_table: 1` in `document_information.parameters`. If so, `summary_1` is used as the text. The analyst receives a description of the table's structure and purpose. Because the "text" is a description rather than actual data, the LLM naturally produces a pointer-style response: "this question may be answerable by consulting this table, looking for [X]".
+**Analysis**: In the WS8 Stage 4 active-pool builder, table sub-units with empty `text` are retained when the item type has `data_table: 1` and `summary_1` is available. `ChunkAnalyzer.analyze_phase1()` then uses `summary_1` as the analysis text. The analyst receives a description of the table's structure and purpose. Because the "text" is a description rather than actual data, the LLM naturally produces a pointer-style response: "this question may be answerable by consulting this table, looking for [X]".
 
 No special analyst instruction is needed for the first pass — the pointer-style response emerges naturally from the summarized content.
 
@@ -184,7 +184,7 @@ The type is normally named `"table"` to match the natural language used in docum
 - **Pointer-only Stage 4 answers**: Stage 4 can tell a user "the answer is probably in the Entity List table, look for China in the Country column" but cannot query specific rows. Row-level Q&A would require a different architecture (e.g., structured table parsing + SQL or embedding-based row lookup).
 - **No row-level Q&A**: The table content is stored in `table_html` but is not indexed. Retrieving specific rows requires a separate lookup mechanism not yet implemented.
 - **Approximate row count**: `table_row_count` counts all row elements including header and footer rows, so the count may slightly exceed the number of data rows.
-- **`parse_appendix` only**: XML-level interception is implemented in `parse_appendix()` (direct appendix children and tables inside nested DIVs via `extract_nested_div_content()`). Large tables in regular CFR sections (`parse_section()`) are not yet extracted as sub-units.
+- **GPOTABLE not present in eCFR corpus**: The `GPOTABLE` element (GPO bulk XML format) does not appear in any eCFR XML title download. All CFR tables in the eCFR corpus use HTML `TABLE` format. The `GPOTABLE` handling code is correct and future-proof for bulk XML sources, but is currently dormant.
 ---
 
 ## 11. Table Sub-Units Nested Inside Method Sections (Task 9.11)

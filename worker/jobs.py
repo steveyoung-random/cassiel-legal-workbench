@@ -1183,12 +1183,14 @@ def process_question_job(queue, job):
         # Phase 1: Relevance scoring
         queue.log_message(job_id, 'INFO', 'Phase 1: Scoring relevance of units')
         queue.update_progress(job_id, 'relevance_scoring', 'starting', 0, 100)
-        qp.score_relevance(max_items=max_items, max_tokens=max_tokens)
+        qp.score_relevance(max_tokens=max_tokens)
 
         # Count scored units
-        relevance_scores = 0
-        if 'relevance_scores' in question_object:
-            relevance_scores = len(question_object['relevance_scores'])
+        relevance_scores = sum(
+            len(type_scores)
+            for type_scores in question_object.get('scores', {}).values()
+            if isinstance(type_scores, dict)
+        )
         queue.log_message(job_id, 'INFO', f'Scored {relevance_scores} units')
 
         # Check if mode is configured to stop after scoring
@@ -1206,23 +1208,17 @@ def process_question_job(queue, job):
         # Phase 2: Iterative analysis
         queue.log_message(job_id, 'INFO', 'Phase 2: Running iterative analysis')
         queue.update_progress(job_id, 'iterative_analysis', 'starting', 0, 100)
-        qp.run_to_stability(base_max_iterations=None)  # Uses mode_config["max_analysis_passes"]
+        qp.run_analysis()
 
-        # Phase 3: Cleanup
-        queue.log_message(job_id, 'INFO', 'Phase 3: Cleaning up scratch document')
-        queue.update_progress(job_id, 'cleanup', 'processing', 0, 1)
-        qp.cleanup_scratch_and_answer()
-        queue.update_progress(job_id, 'cleanup', 'completed', 1, 1)
-
-        # Phase 4: Final answer
-        queue.log_message(job_id, 'INFO', 'Phase 4: Generating final answer')
+        # Phase 3: Final answer
+        queue.log_message(job_id, 'INFO', 'Phase 3: Generating final answer')
         queue.update_progress(job_id, 'final_answer', 'processing', 0, 1)
         qp.generate_final_answer()
         queue.update_progress(job_id, 'final_answer', 'completed', 1, 1)
 
-        # Phase 5: Quality check (optional) - runs AFTER final answer to validate it
+        # Phase 4: Quality check (optional) - runs AFTER final answer to validate it
         if qp.mode_config.get("quality_check_phase", False):
-            queue.log_message(job_id, 'INFO', 'Phase 5: Running quality check on final answer')
+            queue.log_message(job_id, 'INFO', 'Phase 4: Running quality check on final answer')
             queue.update_progress(job_id, 'quality_check', 'processing', 0, 1)
             qp.quality_check_answer()
             queue.update_progress(job_id, 'quality_check', 'completed', 1, 1)
@@ -1231,7 +1227,7 @@ def process_question_job(queue, job):
         qp.question_object['complete'] = True
         qp._save_question_object()
 
-        queue.update_progress(job_id, 'complete', 'finished', 4, 4)
+        queue.update_progress(job_id, 'complete', 'finished', 3, 3)
 
         final_answer = qp.question_object['working_answer']['text']
         queue.log_message(job_id, 'INFO', f'Answer generated ({len(final_answer)} characters)')
