@@ -49,6 +49,7 @@ from utils import (
     has_sub_units,
     get_organizational_item_name_set,
     find_substantive_unit_with_maximum_matching,
+    expand_element_range,
 )
 from utils.text_processing import strip_emphasis_marks
 from utils.document_handling import _resolve_param_key
@@ -108,6 +109,8 @@ class ScratchDocumentManager:
             scratch["final_answer"] = None
         scratch.setdefault("fact_pool_summary", "")
         scratch.setdefault("unresolved_questions", [])
+        scratch.setdefault("rejected_inquiries", [])
+        scratch.setdefault("bridge_rejections", [])
 
     @property
     def scratch(self) -> Dict[str, Any]:
@@ -218,6 +221,57 @@ class ScratchDocumentManager:
                     q["proposed_by"].append(label)
                 return True
         return False
+
+    def add_rejected_inquiry(
+        self,
+        kind: str,
+        text: str,
+        source_unit: str,
+        analyst_reason: str = "",
+        gate_reason: str = "",
+        depth: int = 0,
+    ) -> None:
+        """
+        Record a rejected section request or sub-question for post-run visibility.
+
+        Dedupes on (kind, text, source_unit, gate_reason): the same proposer hitting
+        the same gate verdict for the same target repeatedly produces only one entry,
+        which keeps the diagnostic section bounded on noisy runs.
+        """
+        text_norm = text.strip()
+        source_norm = self._label(source_unit)
+        gate_norm = (gate_reason or "").strip()
+        for existing in self.scratch["rejected_inquiries"]:
+            if (
+                existing.get("kind") == kind
+                and existing.get("text") == text_norm
+                and existing.get("source_unit") == source_norm
+                and existing.get("gate_reason") == gate_norm
+            ):
+                return
+        self.scratch["rejected_inquiries"].append({
+            "kind": kind,
+            "text": text_norm,
+            "source_unit": source_norm,
+            "analyst_reason": (analyst_reason or "").strip(),
+            "gate_reason": gate_norm,
+            "depth": depth,
+        })
+
+    def add_bridge_rejection(
+        self,
+        fact_content: str,
+        source_unit: str,
+        sub_question: str,
+        rationale: str = "",
+    ) -> None:
+        """Record a sub-question-context fact rejection for later tuning."""
+        self.scratch["bridge_rejections"].append({
+            "fact_content": fact_content.strip(),
+            "source_unit": self._label(source_unit),
+            "sub_question": sub_question.strip(),
+            "rationale": (rationale or "").strip(),
+        })
 
     def mark_question_seen(self, question_id: str, unit_id: str) -> bool:
         """Record that a unit has been offered this question."""
@@ -641,6 +695,17 @@ def _gate_and_merge_fact(
                 out["merged_content"] = mc
         else:
             out["verdict"] = "accept"  # referenced ID not found — just accept
+    elif verdict == "reject" and question_context:
+        # Record bridge-context rejections for post-run tuning of the rationale-bridge
+        # criterion. We only capture rejections that occurred while gating against a
+        # sub-question, since those are the ones whose acceptance/rejection turns on
+        # the bridge to the primary question rather than on local relevance.
+        scratch_manager.add_bridge_rejection(
+            fact_content=proposed_content,
+            source_unit=source_unit,
+            sub_question=question_context,
+            rationale=question_rationale or "",
+        )
 
     return out
 
@@ -788,7 +853,7 @@ def _gate_question(
     """
     # Cheap heuristic first: is it basically a restatement of the primary question?
     if _is_near_duplicate_of_primary(proposed_question, primary_question):
-        return {"verdict": "reject"}
+        return {"verdict": "reject", "reason": "near-duplicate of the primary question"}
 
     existing_open = [q for q in scratch_manager.questions if q["status"] == "open"]
     has_facts = bool(scratch_manager.facts)
@@ -873,7 +938,7 @@ def _gate_question(
         "already resolve.\n\n"
         "Respond with ONLY JSON in one of these forms:\n"
         '{"verdict": "accept"}\n'
-        '{"verdict": "reject"}\n'
+        '{"verdict": "reject", "reason": "Brief reason for rejection."}\n'
         '{"verdict": "merge", "merge_question_id": "q001"}\n'
     )
 
@@ -898,6 +963,10 @@ def _gate_question(
             out["merge_question_id"] = qid
         else:
             out["verdict"] = "accept"
+    elif verdict == "reject":
+        reason = str(result.get("reason", "")).strip()
+        if reason:
+            out["reason"] = reason
 
     return out
 
@@ -909,68 +978,111 @@ def _gate_question(
 # (processing.request_gate_text_excerpt_max_chars).
 
 
-def _resolve_section_request_target(
-    target_type: str,
-    target_number: str,
-    primary_parsed_content: Optional[Dict[str, Any]],
-    external_documents: Optional[Dict[str, Any]],
-    text_excerpt_max_chars: int,
-    primary_doc_label: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
+# ---------------------------------------------------------------------------
+# Section-request target resolution (8.R9)
+# ---------------------------------------------------------------------------
+#
+# Stage 4 section requests come from analysts as strings that the resolver
+# turns into actual unit dicts. Surface forms include:
+#
+#   - "11121"                       — bare canonical number (literal match)
+#   - "11121(e)"                    — paragraph subscript appended
+#   - "11123 (full text)"           — explanatory parenthetical
+#   - "11130 et seq."               — Latin range marker
+#   - {"first": ..., "last": ...}   — analyst-emitted explicit range
+#
+# Resolution strategy:
+#   1. Literal lookup_item in the primary doc.
+#   2. If miss, fall back to Stage 2's find_substantive_unit_with_maximum_matching,
+#      which does longest-backward-prefix match (handles paragraph subscripts,
+#      parentheticals, trailing markers — anything where the next char after the
+#      real unit number is non-alphanumeric).
+#   3. If still miss, try each external doc with the same two-step pattern.
+#   4. For ranges, expand via expand_element_range up to range_cap; if exceeded,
+#      fall back to first endpoint only and record truncation.
+#
+# Why pre-resolve before gating: the gate decision needs the target's actual
+# summary and text excerpt, and the enqueue path needs the canonical number to
+# match a real dict key. Doing the resolution once and threading the result
+# through preserves the 8.R7 invariant that the gate and the enqueue agree on
+# what target is being judged — extended now to "target set" for ranges.
+
+
+def _find_type_in_parameters(
+    parsed_content: Optional[Dict[str, Any]], target_type: str
+) -> Optional[Tuple[str, str, str]]:
+    """Find the operational parameter entry matching target_type (case-insensitive).
+
+    Returns (canonical_name, canonical_name_plural, param_key) or None.
     """
-    Resolve a section-request target to its summary + truncated text excerpt,
-    mirroring _enqueue_section_requests' resolution order exactly so the gate
-    judges the same target the enqueue will add.
-
-    Resolution order (mirrors enqueue):
-      1. Derive item_type_names from the PRIMARY doc's parameters table. (If the
-         primary doc has no operational type matching target_type, the request
-         cannot be enqueued at all, so the gate also gives up.)
-      2. Look up in the primary doc.
-      3. If not found, look up in self._external_documents in iteration order;
-         first hit wins.
-
-    The requesting unit's own doc is not searched separately: when the requester
-    is the primary, it is covered by step 2; when the requester is an external
-    unit, that doc is one of the entries in external_documents.
-
-    Returns {"summary", "text_excerpt", "source_doc_label", "found_label"} or None.
-    """
-    if not primary_parsed_content:
+    if not parsed_content:
         return None
-
-    # Step 1: derive item_type_names from primary's parameters (matches enqueue).
-    param_pointer = primary_parsed_content.get("document_information", {}).get("parameters", {})
-    item_type_name_found: Optional[str] = None
-    item_type_names: Optional[str] = None
-    for pd in param_pointer.values():
+    param_pointer = parsed_content.get("document_information", {}).get("parameters", {})
+    for pk, pd in param_pointer.items():
         if not isinstance(pd, dict):
             continue
         if not (pd.get("operational") == 1 and pd.get("name")):
             continue
         if pd["name"].lower() == target_type.lower():
-            item_type_name_found = pd["name"]
-            item_type_names = pd.get("name_plural", "")
-            break
+            return pd["name"], pd.get("name_plural", ""), str(pk)
+    return None
 
-    if not item_type_names:
+
+def _lookup_with_max_match(
+    parsed_content: Dict[str, Any], target_type: str, designation: str
+) -> Optional[Tuple[str, str, Dict[str, Any]]]:
+    """Look up a unit by literal match first, then backward-prefix max-match fallback.
+
+    Returns (canonical_type, canonical_number, working_item) or None. The canonical
+    type/number are taken from the document's own parameters table (not the
+    analyst's surface form), so downstream callers get clean state.
+    """
+    type_info = _find_type_in_parameters(parsed_content, target_type)
+    if type_info is None:
         return None
+    canonical_type, type_plural, _ = type_info
 
-    # Step 2 & 3: primary first, then externals.
-    working_item = lookup_item(primary_parsed_content, item_type_names, target_number)
-    source_doc_label: Optional[str] = primary_doc_label if working_item is not None else None
-    if working_item is None and external_documents:
-        for ext_file, ext_doc in external_documents.items():
-            wi = lookup_item(ext_doc, item_type_names, target_number)
-            if wi is not None:
-                working_item = wi
-                source_doc_label = os.path.basename(ext_file).replace("_processed.json", "")
-                break
+    # Literal match — exact-key membership in the doc's actual unit dict.
+    wi = lookup_item(parsed_content, type_plural, designation)
+    if wi is not None:
+        return canonical_type, designation, wi
 
-    if working_item is None:
-        return None
+    # Backward-prefix fallback (Stage 2 primitive). Only fires when literal misses,
+    # so a real sibling section cannot be silently shadowed by a parent.
+    matched_type, matched_num = find_substantive_unit_with_maximum_matching(
+        parsed_content, target_type, designation
+    )
+    if matched_type and matched_num:
+        # The max-match helper may return a different type (e.g., "section" when
+        # the analyst said "subsection"). Re-derive plural from the doc's params.
+        matched_type_info = _find_type_in_parameters(parsed_content, matched_type)
+        if matched_type_info is not None:
+            canonical_type, matched_plural, _ = matched_type_info
+        else:
+            _, matched_plural = canonical_org_types(matched_type)
+        wi = lookup_item(parsed_content, matched_plural, matched_num)
+        if wi is not None:
+            return canonical_type, matched_num, wi
+    return None
 
-    name_found = item_type_name_found or target_type
+
+def _build_target_info(
+    parsed_content: Dict[str, Any],
+    canonical_type: str,
+    canonical_number: str,
+    working_item: Dict[str, Any],
+    source_doc_label: Optional[str],
+    source_doc_file: Optional[str],
+    text_excerpt_max_chars: int,
+) -> Dict[str, Any]:
+    """Bundle a resolved unit into the dict shape passed through gate + enqueue."""
+    type_info = _find_type_in_parameters(parsed_content, canonical_type)
+    if type_info is not None:
+        _, type_plural, type_param_key = type_info
+    else:
+        _, type_plural = canonical_org_types(canonical_type)
+        type_param_key = None
+
     summary = (
         working_item.get("summary_2")
         or working_item.get("summary_1")
@@ -984,11 +1096,158 @@ def _resolve_section_request_target(
         text_excerpt = text
 
     return {
+        "parsed_content": parsed_content,
+        "canonical_type": canonical_type,
+        "canonical_number": canonical_number,
+        "canonical_type_plural": type_plural,
+        "type_param_key": type_param_key,
+        "working_item": working_item,
+        "source_doc_label": source_doc_label,
+        "source_doc_file": source_doc_file,
         "summary": summary.strip() if isinstance(summary, str) else "",
         "text_excerpt": text_excerpt,
-        "source_doc_label": source_doc_label,
-        "found_label": f"{name_found.capitalize()} {target_number}",
+        "found_label": f"{canonical_type.capitalize()} {canonical_number}",
     }
+
+
+def _resolve_target(
+    target_type: str,
+    primary_parsed_content: Optional[Dict[str, Any]],
+    external_documents: Optional[Dict[str, Any]],
+    *,
+    number: Optional[str] = None,
+    first: Optional[str] = None,
+    last: Optional[str] = None,
+    text_excerpt_max_chars: int = 6000,
+    primary_doc_label: Optional[str] = None,
+    range_cap: int = 15,
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Resolve a section-request target — single or range — to canonical unit(s).
+
+    Shape selection:
+      - `number` alone     → single-target resolution
+      - `first` and `last` → range resolution via expand_element_range
+      - neither            → ([], "missing_inputs")
+
+    Single-target resolution: literal lookup, then max-match fallback, in primary
+    first then each external doc.
+
+    Range resolution: both endpoints must resolve in the SAME document (primary
+    preferred, then each external). The expanded list is capped at range_cap; if
+    exceeded, the first endpoint is returned with error_kind "range_cap_exceeded"
+    so the caller can log truncation.
+
+    Returns (targets, error_kind). On success error_kind is None.
+    """
+    if not primary_parsed_content:
+        return [], "type_not_resolvable"
+
+    is_range = bool(first) and bool(last)
+    is_single = bool(number)
+    if not is_range and not is_single:
+        return [], "missing_inputs"
+
+    # target_type must be a real operational type in primary; if not, no resolution
+    # path can work (and the enqueue would skip).
+    if _find_type_in_parameters(primary_parsed_content, target_type) is None:
+        return [], "type_not_resolvable"
+
+    if is_single:
+        resolved = _lookup_with_max_match(primary_parsed_content, target_type, number)
+        used_content = primary_parsed_content
+        source_label = primary_doc_label
+        source_file = None
+        if resolved is None and external_documents:
+            for ext_file, ext_doc in external_documents.items():
+                ext_resolved = _lookup_with_max_match(ext_doc, target_type, number)
+                if ext_resolved is not None:
+                    resolved = ext_resolved
+                    used_content = ext_doc
+                    source_label = os.path.basename(ext_file).replace("_processed.json", "")
+                    source_file = ext_file
+                    break
+        if resolved is None:
+            return [], "not_present"
+        ct, cn, wi = resolved
+        return ([
+            _build_target_info(
+                used_content, ct, cn, wi,
+                source_label, source_file, text_excerpt_max_chars,
+            )
+        ], None)
+
+    # Range: both endpoints must resolve in the same document.
+    first_in_primary = _lookup_with_max_match(primary_parsed_content, target_type, first)
+    last_in_primary = _lookup_with_max_match(primary_parsed_content, target_type, last)
+    used_content = primary_parsed_content
+    source_label = primary_doc_label
+    source_file = None
+    first_resolved: Optional[Tuple[str, str, Dict[str, Any]]] = None
+    last_resolved: Optional[Tuple[str, str, Dict[str, Any]]] = None
+    if first_in_primary is not None and last_in_primary is not None:
+        first_resolved, last_resolved = first_in_primary, last_in_primary
+    elif external_documents:
+        for ext_file, ext_doc in external_documents.items():
+            ef = _lookup_with_max_match(ext_doc, target_type, first)
+            el = _lookup_with_max_match(ext_doc, target_type, last)
+            if ef is not None and el is not None:
+                first_resolved, last_resolved = ef, el
+                used_content = ext_doc
+                source_label = os.path.basename(ext_file).replace("_processed.json", "")
+                source_file = ext_file
+                break
+    if first_resolved is None or last_resolved is None:
+        return [], "not_present"
+
+    canonical_first_type, canonical_first_num, first_wi = first_resolved
+    _, canonical_last_num, _ = last_resolved
+
+    # Use first endpoint's canonical type as the range type; canonical_org_types
+    # gives us the matching plural for lookup_item calls below.
+    range_type = canonical_first_type
+    _, range_plural = canonical_org_types(range_type)
+    expanded = expand_element_range(
+        used_content, range_type, canonical_first_num, canonical_last_num
+    )
+    if not expanded:
+        return [], "not_present"
+    if len(expanded) > range_cap:
+        # Truncation: keep first endpoint only so the gate can still judge it.
+        return ([
+            _build_target_info(
+                used_content, canonical_first_type, canonical_first_num, first_wi,
+                source_label, source_file, text_excerpt_max_chars,
+            )
+        ], "range_cap_exceeded")
+
+    targets: List[Dict[str, Any]] = []
+    missing: List[str] = []
+    for num in expanded:
+        wi = lookup_item(used_content, range_plural, num)
+        if wi is None:
+            # expand_element_range walks the same parsed_content as lookup_item,
+            # so a miss here means the two views of the document disagree about
+            # which units exist. Project policy is to fail loudly on structural
+            # inconsistencies rather than silently shorten the result list.
+            missing.append(num)
+            continue
+        targets.append(_build_target_info(
+            used_content, range_type, num, wi,
+            source_label, source_file, text_excerpt_max_chars,
+        ))
+    if missing:
+        raise InputError(
+            "Range expansion structural inconsistency: expand_element_range "
+            f"yielded {len(expanded)} {range_plural} numbers but "
+            f"{len(missing)} could not be looked up "
+            f"({', '.join(missing[:5])}{'...' if len(missing) > 5 else ''}). "
+            "expand_element_range and lookup_item should agree on the set of "
+            "units present in the document."
+        )
+    if not targets:
+        # Reached only if expanded was empty after filtering — defensive.
+        return [], "not_present"
+    return targets, None
 
 
 def _gate_section_request(
@@ -997,36 +1256,21 @@ def _gate_section_request(
     config: Optional[Dict],
     logfile: str,
     primary_question: str,
-    target_type: str,
-    target_number: str,
+    target_info: Dict[str, Any],
     reason: str,
     proposed_by_unit: str,
-    primary_parsed_content: Optional[Dict[str, Any]] = None,
-    external_documents: Optional[Dict[str, Any]] = None,
-    primary_doc_label: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Materiality gate for a proposed section/unit request (task qa.gate.request_materiality).
+    Materiality gate for a pre-resolved section/unit request (task
+    qa.gate.request_materiality).
 
-    Looks up the requested target's summary and text excerpt, then decides
-    against a high materiality bar: accept only if the section's actual
-    content is reasonably likely to change the final answer.
+    Takes a target_info dict (produced by _resolve_target) containing the
+    target's summary + text excerpt and decides against a high materiality bar:
+    accept only if the section's actual content is reasonably likely to change
+    the final answer.
 
-    Returns: {"verdict": "accept"} or {"verdict": "reject"}.
+    Returns: {"verdict": "accept"} or {"verdict": "reject", "reason": "..."}.
     """
-    from utils.config import get_request_gate_text_excerpt_max_chars
-    target_info = _resolve_section_request_target(
-        target_type, target_number,
-        primary_parsed_content=primary_parsed_content,
-        external_documents=external_documents,
-        text_excerpt_max_chars=get_request_gate_text_excerpt_max_chars(config),
-        primary_doc_label=primary_doc_label,
-    )
-
-    if target_info is None:
-        # Cannot find the requested target → can't judge materiality → reject.
-        return {"verdict": "reject"}
-
     summary_block = target_info["summary"] or "(no summary available)"
     excerpt_block = target_info["text_excerpt"] or "(no text available)"
     external_clause = ""
@@ -1058,7 +1302,7 @@ def _gate_section_request(
         "anchor in the rationale field.\n\n"
         "Respond with ONLY JSON in one of these forms:\n"
         '{"verdict": "accept", "rationale": "Brief, content-anchored reason."}\n'
-        '{"verdict": "reject"}\n'
+        '{"verdict": "reject", "reason": "Brief reason for rejection."}\n'
     )
 
     try:
@@ -1066,15 +1310,20 @@ def _gate_section_request(
                             config=config, task_name="qa.gate.request_materiality")
     except Exception:
         # Fail-conservative: reject on error to protect against runaway re-analysis.
-        return {"verdict": "reject"}
+        return {"verdict": "reject", "reason": "gate call failed (fail-conservative)"}
 
     if not isinstance(result, dict):
-        return {"verdict": "reject"}
+        return {"verdict": "reject", "reason": "gate returned malformed response"}
 
     verdict = str(result.get("verdict", "reject")).strip().lower()
     if verdict not in ("accept", "reject"):
         verdict = "reject"
-    return {"verdict": verdict}
+    out: Dict[str, Any] = {"verdict": verdict}
+    if verdict == "reject":
+        reason = str(result.get("reason", "")).strip()
+        if reason:
+            out["reason"] = reason
+    return out
 
 
 def _is_near_duplicate_of_primary(proposed: str, primary: str) -> bool:
@@ -2049,7 +2298,7 @@ class ChunkAnalyzer:
         question_block = f"Primary question:\n{question_text}\n\n"
         schema_block = (
             'Respond with a JSON object:\n'
-            '{"facts": ["...", "..."], "section_requests": [{"type": "Section", "number": "201", "reason": "..."}]}\n\n'
+            '{"facts": ["...", "..."], "section_requests": [...]}\n\n'
             "Each fact must be:\n"
             "- A complete, self-contained statement\n"
             "- Directly relevant to the question\n"
@@ -2062,7 +2311,27 @@ class ChunkAnalyzer:
             "than constructing the link.\n\n"
             "section_requests: specific units whose actual content is needed to answer the question "
             "but is not present in your portion. Only request a unit when knowing its content "
-            "is necessary — not merely because your portion mentions it. Include a concrete reason.\n"
+            "is necessary — not merely because your portion mentions it. Each entry takes ONE of "
+            "two shapes:\n"
+            '  Single section: {"type": "Section", "number": "<id>", "reason": "..."}\n'
+            '  Explicit range: {"type": "Section", "first": "<id>", "last": "<id>", "reason": "..."}\n'
+            "Rules for section_requests:\n"
+            "- `number` must be the bare section identifier (e.g., \"11121\"), not decorated with "
+            "paragraph subscripts, parentheticals, or commentary.\n"
+            "- Use the range form ONLY when the source text invokes a range with two explicit "
+            "endpoints (e.g., \"Sections 11122 to 11124, inclusive\", \"Sections 2258A through 2258E\", "
+            "\"Sections 84504-84504.3\"). The resolver will expand the range to all sections within it.\n"
+            "- When the source text invokes such a range, emit ONE range entry — do NOT enumerate "
+            "the intermediate sections yourself. Example: source text \"sections 4201 through 4204\" "
+            "→ {\"type\": \"Section\", \"first\": \"4201\", \"last\": \"4204\", \"reason\": \"...\"} "
+            "(one entry, not four).\n"
+            "- If the source text enumerates multiple sections explicitly (e.g., \"Sections X and Y\", "
+            "\"Sections X, Y, and Z\"), emit ONE request entry per section using the single-section "
+            "form. Do not combine them in `number`.\n"
+            "- Do NOT use the range form for \"et seq.\" — that is a citation device for naming "
+            "an Act, not a content request. If you believe the starting section is relevant, emit "
+            "a single-section request for it.\n"
+            "- Include a concrete reason tied to the primary question.\n"
             'If you find no relevant facts and have no requests, respond: {"facts": [], "section_requests": []}\n\n'
         )
 
@@ -2133,8 +2402,7 @@ class ChunkAnalyzer:
         )
         schema_block = (
             'Respond with a JSON object:\n'
-            '{"questions": [{"text": "...", "rationale": "..."}], '
-            '"requests": [{"type": "Section", "number": "201", "reason": "..."}]}\n\n'
+            '{"questions": [{"text": "...", "rationale": "..."}], "requests": [...]}\n\n'
             "Rules for sub-questions:\n"
             "- Ask about substance, not location. Frame questions as 'What does the document require for X?' "
             "or 'What restrictions apply to Y?' — NOT 'Which section covers X?' or 'Is there a section that...'.\n"
@@ -2143,7 +2411,21 @@ class ChunkAnalyzer:
             "- Do NOT ask questions already answered by your own unit's content.\n"
             "- rationale: explain in one sentence why the answer to this sub-question would help answer "
             "the primary question — what the implication of a positive or negative answer would be.\n"
-            "Section request rules:\n"
+            "Rules for requests (section requests). Each entry takes ONE of two shapes:\n"
+            '  Single section: {"type": "Section", "number": "<id>", "reason": "..."}\n'
+            '  Explicit range: {"type": "Section", "first": "<id>", "last": "<id>", "reason": "..."}\n'
+            "- `number` must be the bare section identifier (e.g., \"11121\"), not decorated with "
+            "paragraph subscripts, parentheticals, or commentary.\n"
+            "- Use the range form ONLY when the source text invokes a range with two explicit "
+            "endpoints (e.g., \"Sections 11122 to 11124, inclusive\", \"Sections 2258A through 2258E\"). "
+            "The resolver will expand it.\n"
+            "- When the source text invokes such a range, emit ONE range entry — do NOT enumerate "
+            "the intermediate sections yourself. Example: source text \"sections 4201 through 4204\" "
+            "→ {\"type\": \"Section\", \"first\": \"4201\", \"last\": \"4204\", \"reason\": \"...\"} "
+            "(one entry, not four).\n"
+            "- For explicit enumerations like \"Sections X and Y\", emit ONE request per section using "
+            "the single form. Do not combine them in `number`.\n"
+            "- Do NOT use the range form for \"et seq.\" — that names an Act, not a content request.\n"
             "- Include a concrete reason tied to the primary question.\n"
             'If nothing to propose: {"questions": [], "requests": []}\n\n'
         )
@@ -2259,9 +2541,12 @@ class ChunkAnalyzer:
             all_proposed_facts.extend(chunk_facts)
             prior_facts.extend(chunk_facts)
 
+            # Accept either single-section ({number}) or range ({first, last}) form.
             chunk_requests = [
                 r for r in result_obj.get("section_requests", [])
-                if isinstance(r, dict) and r.get("type") and r.get("number")
+                if isinstance(r, dict)
+                and r.get("type")
+                and (r.get("number") or (r.get("first") and r.get("last")))
             ]
             all_proposed_requests.extend(chunk_requests)
 
@@ -2317,7 +2602,16 @@ class ChunkAnalyzer:
             if text:
                 questions.append((text, rationale))
 
-        requests = [r for r in result_obj.get("requests", []) if isinstance(r, dict)]
+        # Phase 2 filter mirrors Phase 1: require `type` and either `number`
+        # (single) or both `first` and `last` (range). Malformed entries are
+        # dropped here rather than reaching _gate_and_enqueue_requests where
+        # they would be silently skipped without a rejected_inquiry record.
+        requests = [
+            r for r in result_obj.get("requests", [])
+            if isinstance(r, dict)
+            and r.get("type")
+            and (r.get("number") or (r.get("first") and r.get("last")))
+        ]
         return questions, requests
 
     # ------------------------------------------------------------------
@@ -3365,6 +3659,7 @@ class QuestionProcessor:
                     "parsed_content": self.parsed_content,
                     "external_doc_label": None,
                     "parent_parsed_content": getattr(self, "_parent_parsed_content", None),
+                    "derivation_depth": 0,
                 })
 
         # Cross-document units
@@ -3412,6 +3707,7 @@ class QuestionProcessor:
                         "parsed_content": ext_doc,
                         "external_doc_label": ext_label,
                         "parent_parsed_content": None,
+                        "derivation_depth": 0,
                     })
 
         pool.sort(key=lambda u: -u["score"])
@@ -3501,6 +3797,15 @@ class QuestionProcessor:
         pending_requests: List[Dict[str, Any]],
     ) -> int:
         """
+        OBSOLETE: dead code preserved temporarily for reference.
+
+        This method belongs to the pre-queue-driven (round-based) Phase 2 path
+        and is not called anywhere in the WS8 queue-driven flow. Section requests
+        are now handled by `_gate_and_enqueue_requests` and `_enqueue_section_requests`
+        (nested closures inside `run_analysis`), which go through `_resolve_target`
+        (8.R9) for canonical resolution and range expansion. Do not call this method;
+        do not extend it. Slated for removal.
+
         Process section requests collected during Phase 2.
         Adds validated units to scores for next round.
         Returns count of new units added.
@@ -3688,7 +3993,96 @@ class QuestionProcessor:
                 target_number = req["target_number"].strip()
                 if not target_type or not target_number:
                     continue
+                child_depth = int(req.get("source_depth", 0)) + 1
 
+                # 8.R9 short-circuit: if the request carries a pre-resolved
+                # target_info (produced upstream by _resolve_target), use it
+                # directly. target_type/target_number are already canonical and
+                # the working_item is already known, so we skip the parameter
+                # walk and the literal lookup_item.
+                resolved_target = req.get("resolved_target")
+                if resolved_target is not None:
+                    item_type_name_found = resolved_target["canonical_type"]
+                    item_type_names = resolved_target["canonical_type_plural"]
+                    item_type_key = resolved_target.get("type_param_key")
+                    working_item = resolved_target["working_item"]
+                    rt_source_file = resolved_target.get("source_doc_file")
+                    rt_source_label = resolved_target.get("source_doc_label")
+                    rt_parsed_content = resolved_target.get("parsed_content")
+
+                    if rt_source_file is not None:
+                        # Cross-doc target
+                        if self._add_cross_doc_unit(
+                            rt_source_file, target_type.lower(), target_number
+                        ):
+                            ext_label = rt_source_label or os.path.basename(
+                                rt_source_file
+                            ).replace("_processed.json", "")
+                            candidate_label = (
+                                f"{item_type_name_found.capitalize()} {target_number}"
+                            )
+                            full_label_ext = ScratchDocumentManager(
+                                self.question_object, source_doc_label=ext_label
+                            )._label(candidate_label)
+                            if (
+                                full_label_ext not in active_unit_labels
+                                and not any(
+                                    _unit_label(u) == full_label_ext for u in unit_queue
+                                )
+                            ):
+                                new_ui = {
+                                    "unit_id": target_number,
+                                    "unit_label": candidate_label,
+                                    "type_name": item_type_name_found,
+                                    "type_names": item_type_names,
+                                    "type_key": target_type.lower(),
+                                    "score": 2,
+                                    "working_item": working_item,
+                                    "parsed_content": rt_parsed_content,
+                                    "external_doc_label": ext_label,
+                                    "parent_parsed_content": None,
+                                    "derivation_depth": child_depth,
+                                }
+                                unit_queue.append(new_ui)
+                                new_count += 1
+                                print(
+                                    f"  Section request (cross-doc): queued "
+                                    f"{item_type_name_found} {target_number} from {ext_label}"
+                                )
+                        continue
+
+                    # Primary-doc target
+                    candidate_label = f"{item_type_name_found.capitalize()} {target_number}"
+                    if candidate_label in active_unit_labels:
+                        continue
+                    if any(
+                        u["unit_label"] == candidate_label and u["external_doc_label"] is None
+                        for u in unit_queue
+                    ):
+                        continue
+                    type_scores = scores.setdefault(str(item_type_key), {})
+                    if target_number not in type_scores or type_scores[target_number] < 2:
+                        type_scores[target_number] = 2
+                    new_ui = {
+                        "unit_id": target_number,
+                        "unit_label": candidate_label,
+                        "type_name": item_type_name_found,
+                        "type_names": item_type_names,
+                        "type_key": str(item_type_key) if item_type_key is not None else target_type.lower(),
+                        "score": 2,
+                        "working_item": working_item,
+                        "parsed_content": self.parsed_content,
+                        "external_doc_label": None,
+                        "parent_parsed_content": getattr(self, "_parent_parsed_content", None),
+                        "derivation_depth": child_depth,
+                    }
+                    unit_queue.append(new_ui)
+                    new_count += 1
+                    print(f"  Section request: queued {item_type_name_found} {target_number}")
+                    continue
+
+                # Legacy path (no resolved_target attached) — preserved for any
+                # caller that doesn't go through _gate_and_enqueue_requests.
                 item_type_key = None
                 item_type_name_found = None
                 item_type_names = None
@@ -3739,6 +4133,7 @@ class QuestionProcessor:
                                             "parsed_content": ext_doc,
                                             "external_doc_label": ext_label,
                                             "parent_parsed_content": None,
+                                            "derivation_depth": child_depth,
                                         }
                                         unit_queue.append(new_ui)
                                         new_count += 1
@@ -3770,6 +4165,7 @@ class QuestionProcessor:
                     "parsed_content": self.parsed_content,
                     "external_doc_label": None,
                     "parent_parsed_content": getattr(self, "_parent_parsed_content", None),
+                    "derivation_depth": child_depth,
                 }
                 unit_queue.append(new_ui)
                 new_count += 1
@@ -3784,29 +4180,142 @@ class QuestionProcessor:
             proposed_requests: List[Dict[str, Any]],
             source_label: str,
             source_parsed_content: Dict[str, Any],
+            source_depth: int = 0,
         ) -> None:
+            """Resolve each proposed request (single or range), gate per resolved
+            target, and forward accepted ones to _enqueue_section_requests.
+
+            Accepts two analyst output shapes:
+              - {"type", "number", "reason"}              (single section)
+              - {"type", "first", "last", "reason"}       (explicit range)
+
+            Single targets pass through one gate call. Range targets are expanded
+            via _resolve_target's expand_element_range branch (cap 15); each
+            expanded target gets its own gate call carrying the same analyst
+            reason. Canonical numbers from resolution — not the analyst's raw
+            surface form — are what flow into pending and the rejected_inquiries
+            appendix.
+
+            Cross-doc resolution order limitation: resolution searches primary
+            first, then externals. When the requester is on an external unit and
+            the target identifier collides between primary and the requester's
+            own doc, primary wins. This matches the legacy enqueue order so the
+            8.R9 change is no worse than before, but a future cross-doc-aware
+            fix should search the requester's own document (source_parsed_content)
+            first.
+            """
+            from utils.config import get_request_gate_text_excerpt_max_chars
+            text_excerpt_max_chars = get_request_gate_text_excerpt_max_chars(self._config)
             pending = []
             for req in proposed_requests:
                 target_type = str(req.get("type", "")).strip()
-                target_number = str(req.get("number", "")).strip()
-                if not target_type or not target_number:
+                if not target_type:
                     continue
                 reason = str(req.get("reason", "")).strip()
-                verdict = _gate_section_request(
-                    scratch_manager, request_gate_client, self._config, self.logfile,
-                    self.question_text, target_type, target_number, reason, source_label,
+                number = str(req.get("number", "")).strip() or None
+                first = str(req.get("first", "")).strip() or None
+                last = str(req.get("last", "")).strip() or None
+
+                if first and last:
+                    request_text = f"{target_type} {first}-{last}"
+                elif number:
+                    request_text = f"{target_type} {number}"
+                else:
+                    # Malformed: analyst gave us neither shape. Skip silently —
+                    # nothing to gate or enqueue.
+                    continue
+
+                targets, err = _resolve_target(
+                    target_type,
                     primary_parsed_content=self.parsed_content,
                     external_documents=self._external_documents,
+                    number=number, first=first, last=last,
+                    text_excerpt_max_chars=text_excerpt_max_chars,
                     primary_doc_label=None,
                 )
-                if verdict["verdict"] == "accept":
-                    pending.append({
-                        "target_type": target_type,
-                        "target_number": target_number,
-                        "reason": reason,
-                        "source_unit": source_label,
-                        "source_parsed_content": source_parsed_content,
-                    })
+
+                if err == "type_not_resolvable":
+                    scratch_manager.add_rejected_inquiry(
+                        kind="section_request",
+                        text=request_text,
+                        source_unit=source_label,
+                        analyst_reason=reason,
+                        gate_reason=(
+                            f"target type '{target_type}' is not an operational "
+                            f"type in this document"
+                        ),
+                        depth=source_depth,
+                    )
+                    continue
+                if err == "missing_inputs":
+                    # Same shape as the silent-skip above; defensive.
+                    continue
+                if not targets:
+                    # err is "not_present" (or unexpected): record sharpened reason.
+                    scratch_manager.add_rejected_inquiry(
+                        kind="section_request",
+                        text=request_text,
+                        source_unit=source_label,
+                        analyst_reason=reason,
+                        gate_reason=(
+                            "target not present in this document or any loaded "
+                            "external document"
+                        ),
+                        depth=source_depth,
+                    )
+                    continue
+
+                if err == "range_cap_exceeded":
+                    # Truncation note. The first endpoint is still in `targets`
+                    # below and will be gated normally; the diagnostic entry
+                    # records only the SECTIONS BEYOND the first endpoint that
+                    # were NOT pursued, so the "Lines of inquiry not pursued"
+                    # appendix doesn't mis-attribute the first endpoint's
+                    # outcome to this truncation.
+                    first_target = targets[0]
+                    first_label = first_target["found_label"]
+                    scratch_manager.add_rejected_inquiry(
+                        kind="section_request",
+                        text=f"{request_text} (range beyond {first_label} not pursued)",
+                        source_unit=source_label,
+                        analyst_reason=reason,
+                        gate_reason=(
+                            f"range exceeded cap; {first_label} was retained for "
+                            f"materiality judgment but the remainder of the range "
+                            f"was not analyzed"
+                        ),
+                        depth=source_depth,
+                    )
+
+                # Per-target materiality gate. Each expanded target gets its own
+                # decision carrying the same analyst reason — the analyst was
+                # talking about the whole range when it emitted the entry.
+                for target_info in targets:
+                    canonical_type = target_info["canonical_type"]
+                    canonical_number = target_info["canonical_number"]
+                    verdict = _gate_section_request(
+                        scratch_manager, request_gate_client, self._config, self.logfile,
+                        self.question_text, target_info, reason, source_label,
+                    )
+                    if verdict["verdict"] == "accept":
+                        pending.append({
+                            "target_type": canonical_type,
+                            "target_number": canonical_number,
+                            "reason": reason,
+                            "source_unit": source_label,
+                            "source_parsed_content": source_parsed_content,
+                            "source_depth": source_depth,
+                            "resolved_target": target_info,
+                        })
+                    else:
+                        scratch_manager.add_rejected_inquiry(
+                            kind="section_request",
+                            text=f"{canonical_type} {canonical_number}",
+                            source_unit=source_label,
+                            analyst_reason=reason,
+                            gate_reason=verdict.get("reason", ""),
+                            depth=source_depth,
+                        )
             _enqueue_section_requests(pending)
 
         # --- Helper: run Phase 1 for one unit ---
@@ -3825,7 +4334,10 @@ class QuestionProcessor:
             if contributed:
                 print(f"    [P1] {label}: {len(contributed)} fact(s) accepted")
                 self._save_question_object()
-            _gate_and_enqueue_requests(proposed_requests, label, unit_info["parsed_content"])
+            _gate_and_enqueue_requests(
+                proposed_requests, label, unit_info["parsed_content"],
+                source_depth=unit_info.get("derivation_depth", 0),
+            )
             return len(contributed)
 
         # --- Helper: run Phase 2 for one unit ---
@@ -3840,6 +4352,7 @@ class QuestionProcessor:
                 unit_info["unit_id"],
             )
 
+            unit_depth = int(unit_info.get("derivation_depth", 0))
             accepted_q = 0
             for q_text, q_rationale in proposed_questions:
                 verdict = _gate_question(
@@ -3848,17 +4361,32 @@ class QuestionProcessor:
                     close_match_client=question_close_match_client,
                 )
                 if verdict["verdict"] == "accept":
-                    q_id = scratch_manager.add_question(q_text, label, rationale=q_rationale)
+                    q_id = scratch_manager.add_question(
+                        q_text, label, rationale=q_rationale,
+                        derivation_depth=unit_depth,
+                    )
                     question_queue.append(q_id)
                     accepted_q += 1
                 elif verdict["verdict"] == "merge" and verdict.get("merge_question_id"):
                     scratch_manager.merge_question(verdict["merge_question_id"], label)
+                else:
+                    scratch_manager.add_rejected_inquiry(
+                        kind="sub_question",
+                        text=q_text,
+                        source_unit=label,
+                        analyst_reason=q_rationale,
+                        gate_reason=verdict.get("reason", ""),
+                        depth=unit_depth,
+                    )
 
             if accepted_q:
                 print(f"    [P2] {label}: {accepted_q} question(s) accepted")
                 self._save_question_object()
 
-            _gate_and_enqueue_requests(proposed_requests, label, unit_info["parsed_content"])
+            _gate_and_enqueue_requests(
+                proposed_requests, label, unit_info["parsed_content"],
+                source_depth=unit_depth,
+            )
 
         # --- Helper: run Phase 3 for one unit × one question ---
         def _do_phase3(unit_info: Dict[str, Any], q_id: str, q_text: str) -> int:
@@ -3889,7 +4417,10 @@ class QuestionProcessor:
                     q.setdefault("supporting_fact_ids", []).extend(contributed)
                 print(f"    [P3] {label} × {q_id}: {len(contributed)} fact(s)")
                 self._save_question_object()
-            _gate_and_enqueue_requests(proposed_requests, label, unit_info["parsed_content"])
+            _gate_and_enqueue_requests(
+                proposed_requests, label, unit_info["parsed_content"],
+                source_depth=unit_info.get("derivation_depth", 0),
+            )
             return len(contributed)
 
         # --- Helper: run circle-back for one unit × one answered question ---
@@ -3943,7 +4474,10 @@ class QuestionProcessor:
             if contributed:
                 print(f"    [CB] {label} ← {q_id}: {len(contributed)} new fact(s)")
                 self._save_question_object()
-            _gate_and_enqueue_requests(proposed_requests, label, unit_info["parsed_content"])
+            _gate_and_enqueue_requests(
+                proposed_requests, label, unit_info["parsed_content"],
+                source_depth=unit_info.get("derivation_depth", 0),
+            )
             return len(contributed)
 
         # --- Helper: close a question if conditions are met ---
@@ -4046,28 +4580,18 @@ class QuestionProcessor:
         """Deprecated: use run_analysis(). Retained for caller compatibility."""
         self.run_analysis()
 
-    def generate_final_answer(self) -> None:
+    def _build_substantive_scratch_blocks(self) -> Tuple[str, str, str]:
         """
-        Generate a final narrative answer based on the cleaned scratch
-        and (optionally) selected summaries/texts.
-        """
-        # Check if final answer is already complete (idempotency)
-        progress = self.question_object.get("progress", {})
-        if progress.get("final_answer_complete", False):
-            print(f"\n{'='*70}")
-            print("FINAL ANSWER GENERATION")
-            print(f"{'='*70}")
-            print("Final answer already generated, skipping...")
-            return
-        
-        print(f"\n{'='*70}")
-        print("FINAL ANSWER GENERATION")
-        print(f"{'='*70}")
-        print("Synthesizing final answer from scratch document...")
+        Return (facts_block, questions_block, unresolved_block) for substantive
+        answer prompts.
 
+        Deliberately excludes diagnostic scratch fields (`rejected_inquiries`,
+        `bridge_rejections`) so they cannot contaminate a prompt whose answer is
+        supposed to read as a direct interpretation of the source documents.
+        Diagnostic content is surfaced separately via
+        `_generate_lines_not_pursued_section`.
+        """
         scratch = self.question_object.get("scratch", {})
-
-        # Build a clean, structured prompt from the fact pool and question statuses
         facts = scratch.get("facts", [])
         questions = scratch.get("questions", [])
         unresolved = scratch.get("unresolved_questions", [])
@@ -4092,6 +4616,122 @@ class QuestionProcessor:
                 "\nUnanswerable Questions (asked but no information found):\n"
                 + "\n".join(ur_lines) + "\n"
             )
+
+        return facts_block, questions_block, unresolved_block
+
+    def _generate_lines_not_pursued_section(self) -> str:
+        """
+        Generate the "Lines of inquiry not pursued" diagnostic section via a
+        separate, focused prompt.  Returns "" if there are no rejected inquiries.
+
+        This is intentionally a second LLM call rather than part of the main
+        answer prompt: the main answer prompt instructs the synthesizer not to
+        mention analysts or analysis processes, which directly conflicts with
+        the diagnostic purpose of this section.  Splitting the prompts lets each
+        carry the instructions appropriate to its output without contradiction.
+        """
+        scratch = self.question_object.get("scratch", {})
+        rejected = scratch.get("rejected_inquiries", [])
+        if not rejected:
+            return ""
+
+        # Build a compact, structured input listing.  We feed the model the
+        # already-deduped entries (dedup happens at add time) and let it
+        # produce light prose rather than a raw bullet dump.
+        item_lines = []
+        for r in rejected:
+            kind_label = (
+                "Section request"
+                if r.get("kind") == "section_request"
+                else "Sub-question"
+            )
+            target = r.get("text", "")
+            src = r.get("source_unit", "") or "(unknown)"
+            analyst = r.get("analyst_reason", "")
+            gate = r.get("gate_reason", "")
+            depth = r.get("depth", 0)
+            line = f"- [{kind_label}] {target}  | proposed by {src} (depth {depth})"
+            if analyst:
+                line += f"\n    Analyst reason: {analyst}"
+            if gate:
+                line += f"\n    Gate reason: {gate}"
+            item_lines.append(line)
+        items_block = "\n".join(item_lines)
+
+        prompt = (
+            "You are producing a short DIAGNOSTIC appendix to a legal-analysis "
+            "answer. This section makes the research process visible to the "
+            "reader by listing lines of inquiry that were proposed during "
+            "analysis but rejected by a gatekeeper before being pursued.\n\n"
+            f"Primary question being researched:\n{self.question_text}\n\n"
+            f"Rejected inquiries (already deduplicated):\n{items_block}\n\n"
+            "Write a section titled exactly:\n"
+            "    Lines of inquiry not pursued\n\n"
+            "Format:\n"
+            "- One bullet per item above.\n"
+            "- Each bullet should name the kind (section request or sub-question), "
+            "the target/text, the proposing unit, and the gatekeeper's stated "
+            "reason verbatim (or 'no reason recorded' if absent).\n"
+            "- Group identical or near-identical gate reasons together if it "
+            "improves readability, but do not invent reasons.\n"
+            "- Do not editorialize about whether the gatekeeper was right or "
+            "wrong, and do not speculate about what those provisions might have "
+            "contained.\n"
+            "- It is appropriate and expected for this section to refer to "
+            "gatekeepers, analysts, and the analysis process — that is the "
+            "section's purpose.\n"
+            "- Output ONLY the section heading and the bullets. No preamble, "
+            "no closing remarks.\n"
+        )
+
+        client = self._get_client_for_phase('final_answer')
+        try:
+            section_text = query_text_with_retry(
+                client,
+                [],
+                prompt,
+                self.logfile,
+                max_tokens=4000,
+                max_retries=3,
+                config=self._config,
+                task_name='qa.synthesis.final_answer',
+            )
+        except ModelError:
+            # Diagnostic section is optional — failure should not block the answer.
+            return ""
+
+        section_text = (section_text or "").strip()
+        if not section_text:
+            return ""
+        # Separate clearly from the main answer.
+        return "\n\n---\n\n" + section_text
+
+    def generate_final_answer(self) -> None:
+        """
+        Generate a final narrative answer based on the cleaned scratch
+        and (optionally) selected summaries/texts.
+        """
+        # Check if final answer is already complete (idempotency)
+        progress = self.question_object.get("progress", {})
+        if progress.get("final_answer_complete", False):
+            print(f"\n{'='*70}")
+            print("FINAL ANSWER GENERATION")
+            print(f"{'='*70}")
+            print("Final answer already generated, skipping...")
+            return
+        
+        print(f"\n{'='*70}")
+        print("FINAL ANSWER GENERATION")
+        print(f"{'='*70}")
+        print("Synthesizing final answer from scratch document...")
+
+        # Build a clean, structured prompt from the fact pool and question statuses.
+        # Diagnostic scratch fields (rejected_inquiries, bridge_rejections) are
+        # excluded by _build_substantive_scratch_blocks and surfaced separately
+        # via _generate_lines_not_pursued_section, so they cannot contaminate an
+        # answer that is supposed to read as a direct interpretation of the
+        # source documents.
+        facts_block, questions_block, unresolved_block = self._build_substantive_scratch_blocks()
 
         prompt = []
         prompt.append(
@@ -4184,17 +4824,23 @@ class QuestionProcessor:
                 self.question_object["previous_answers"].append(previous_answer_entry)
                 print(f"  Preserved previous answer from {previous_mode} mode in previous_answers history.")
         
+        # Append the diagnostic "Lines of inquiry not pursued" section via a
+        # separate prompt that does not carry the "do not mention process"
+        # instruction.  Empty string if no rejections were recorded.
+        diagnostic = self._generate_lines_not_pursued_section()
+
         # Now set the new answer
-        self.question_object["working_answer"]["text"] = str(answer_text).strip()
-        
+        combined = str(answer_text).strip() + diagnostic
+        self.question_object["working_answer"]["text"] = combined
+
         # Mark final answer as complete (idempotency)
         progress = self.question_object.get("progress", {})
         progress["final_answer_complete"] = True
         self.question_object["progress"] = progress
-        
+
         self._save_question_object()
 
-        print(f"Final answer generated ({len(answer_text)} characters)")
+        print(f"Final answer generated ({len(combined)} characters)")
 
     def quality_check_answer(self) -> None:
         """
@@ -4553,8 +5199,13 @@ class QuestionProcessor:
         Args:
             all_concerns: List of concern dictionaries with unit, assessment, concerns, notes
         """
-        scratch = self.question_object.get("scratch", {})
-        scratch_text = json.dumps(scratch, indent=4)
+        # Use the same substantive-scratch summary as generate_final_answer.
+        # Dumping raw scratch JSON here would feed diagnostic fields
+        # (rejected_inquiries, bridge_rejections) into a prompt that instructs
+        # the synthesizer not to mention process — a contamination risk.  The
+        # diagnostic content is appended afterward via the separate
+        # _generate_lines_not_pursued_section prompt.
+        facts_block, questions_block, unresolved_block = self._build_substantive_scratch_blocks()
 
         # Build concerns summary for the prompt
         concerns_summary = []
@@ -4603,8 +5254,11 @@ class QuestionProcessor:
         prompt.append("\n")
         prompt.append("Question:\n")
         prompt.append(self.question_text + "\n\n")
-        prompt.append("Findings from Document Analysis:\n")
-        prompt.append(scratch_text + "\n\n")
+        prompt.append(f"Collected Facts:\n{facts_block}\n\n")
+        prompt.append(f"Sub-Questions Explored:\n{questions_block}\n")
+        if unresolved_block:
+            prompt.append(unresolved_block)
+        prompt.append("\n")
         prompt.append(
             "Instructions:\n"
             "- ANSWER THE QUESTION AS POSED: The opening of your answer must directly "
@@ -4616,16 +5270,16 @@ class QuestionProcessor:
             "Ensure your statements are consistent with the source units and do not contain the errors flagged.\n"
             "- CRITICAL - CITE DOCUMENT SOURCES: When making claims or statements, you MUST reference "
             "the specific substantive units (e.g., \"Section 5\", \"Article 12\", \"Chapter 3\") where "
-            "that information is found. Each fact or answer entry in the findings above includes a \"source\" "
-            "field showing which document units contributed that information. Use these source labels in your "
-            "answer. You may reference multiple units when information comes from multiple sources.\n"
+            "that information is found. Each fact in the Collected Facts list above includes source labels "
+            "in square brackets — use these labels in your answer. You may reference multiple units when "
+            "information comes from multiple sources.\n"
             "- CROSS-DOCUMENT CITATIONS: When a source label includes a parenthetical document name "
             "(e.g., \"Section 3A090 (Part774)\"), include the document name in your citation "
             "(e.g., \"Part 774, ECCN 3A090\"). This indicates the information comes from a "
             "cross-referenced external document rather than the primary document being analyzed.\n"
-            "- DO NOT reference internal working document identifiers like \"fact_1\", \"answer_2\", or "
-            "\"question_3\". These are internal tracking IDs. ONLY reference the substantive units "
-            "(Sections, Articles, Chapters, etc.) from the \"source\" fields.\n"
+            "- DO NOT reference internal working document identifiers like \"f001\" or \"q001\". "
+            "These are internal tracking IDs. ONLY reference the substantive units "
+            "(Sections, Articles, Chapters, etc.) from the source labels.\n"
             "- DO NOT mention the quality review, concerns, or this regeneration process in your answer. "
             "Write as if you are directly interpreting the legal documents.\n"
             "- Address uncertainties: If the analysis includes unresolved questions that could materially "
@@ -4656,9 +5310,13 @@ class QuestionProcessor:
         except ModelError as e:
             raise ModelError(f"regenerate_answer_with_concerns: Failed to regenerate answer after retries: {e}")
 
-        # Update answer
-        self.question_object["working_answer"]["text"] = str(new_answer_text).strip()
-        print(f"  Regenerated answer ({len(new_answer_text)} characters) addressing {len(all_concerns)} concern(s)")
+        # Re-append the diagnostic section so a regenerated answer carries the
+        # same "Lines of inquiry not pursued" appendix as the initial answer.
+        diagnostic = self._generate_lines_not_pursued_section()
+
+        combined = str(new_answer_text).strip() + diagnostic
+        self.question_object["working_answer"]["text"] = combined
+        print(f"  Regenerated answer ({len(combined)} characters) addressing {len(all_concerns)} concern(s)")
 
     # ------------------------------------------------------------------
     # Utilities
@@ -4675,6 +5333,19 @@ class QuestionProcessor:
 
 
 def main(argv: List[str]) -> int:
+    # Ensure stdout/stderr can emit non-ASCII diagnostics (e.g. the "←" used in
+    # circle-back trace lines) when output is redirected or captured. On Windows,
+    # a redirected stream defaults to the legacy cp1252 codec, which raises
+    # UnicodeEncodeError on those characters and crashes the run. reconfigure()
+    # exists on Python 3.7+; guard for older/oddball streams that lack it.
+    for _stream in (sys.stdout, sys.stderr):
+        _reconfigure = getattr(_stream, "reconfigure", None)
+        if _reconfigure is not None:
+            try:
+                _reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
+
     parser = argparse.ArgumentParser(
         description="Question-answering system for legal documents",
         formatter_class=argparse.RawDescriptionHelpFormatter,

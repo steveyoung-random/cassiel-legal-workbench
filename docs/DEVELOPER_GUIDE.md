@@ -463,9 +463,21 @@ When units are chunked using breakpoints, locally scoped definitions must remain
    - Flags exhausted-but-unanswered questions in `unresolved_questions`
 
 3. **Final Answer** (`generate_final_answer()`)
-   - Synthesizes answer from the WS8 scratch document
+   - Synthesizes answer from the substantive scratch contents (facts, closed sub-questions,
+     unresolved questions). The substantive/diagnostic split is centralized in
+     `_build_substantive_scratch_blocks()`, which both this method and the quality-check
+     regeneration path use, so diagnostic fields cannot leak into a prompt instructed not to
+     mention process.
    - Includes source citations to substantive units
    - Preserves previous mode answers in history
+   - When any section requests or sub-questions were rejected by a gatekeeper during
+     analysis, a second LLM call (`_generate_lines_not_pursued_section`) produces a
+     "Lines of inquiry not pursued" diagnostic appendix listing each rejected item with
+     the gatekeeper's stated reason. The appendix is concatenated onto the substantive
+     answer. Splitting into a second prompt lets each carry the instructions appropriate
+     to its output: the main prompt says "do not mention analysts or process"; the
+     diagnostic prompt says the opposite. When nothing was rejected, no second call is
+     made and no appendix is added.
 
 4. **Quality Check** (`quality_check_answer()`, `maximum_confidence` mode only)
    - Validates final answer against full text of source units
