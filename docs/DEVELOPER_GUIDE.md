@@ -281,6 +281,12 @@ Models are configured in `config.json` with per-task model selection and fallbac
       "platform": "Claude",
       "model": "claude-3-5-sonnet-20241022",
       "max_tokens": 8000
+    },
+    "glm-5.2": {
+      "platform": "DeepInfra",
+      "model": "zai-org/GLM-5.2",
+      "base_url": "https://api.deepinfra.com/v1/openai/",
+      "max_tokens": 8000
     }
   },
   "current_engine": "gpt-5-nano",
@@ -302,6 +308,28 @@ Models are configured in `config.json` with per-task model selection and fallbac
 - Automatic fallback on failures
 - Multiple models per platform
 - Cache compatibility across model names
+
+**Supported platforms:** `OpenAI`, `Claude`, `Azure`, and `DeepInfra`. `DeepInfra` is
+an OpenAI-compatible provider handled by the same `OpenAIClient`; set `base_url`
+(defaults to `https://api.deepinfra.com/v1/openai/`) on the model entry and add a
+`deepinfra_api_key` to `api_keys.py`. The client sends the classic `max_tokens`
+field for DeepInfra (rather than OpenAI's `max_completion_tokens`) and relies on the
+provider's automatic prefix caching, which reports cached tokens in the same
+`usage.prompt_tokens_details.cached_tokens` field the OpenAI path already reads.
+
+*DeepInfra prompt caching is opportunistic, not guaranteed.* DeepInfra serves each
+model from many replicas, each with its own KV cache, so consecutive requests only
+get the cached-input discount when they happen to land on a replica that already
+holds the prefix — `cached_tokens` will read 0 (and `prompt_tokens_details` may be
+absent) on a cold-replica miss, which is normal, not a bug. To raise the hit rate,
+`OpenAIClient` tags DeepInfra requests with a `prompt_cache_key` derived from a hash
+of the stable prefix (system message + cache blocks), so all calls sharing that
+prefix carry the same key and are nudged toward the same replica. The key is
+**per-prefix, never a global constant** (a shared constant would funnel all traffic
+to one replica and thrash its cache) and is only sent for prefixes over ~2000 chars.
+This is enabled only for DeepInfra (`send_prompt_cache_key=True`); the OpenAI path is
+unchanged. The local response cache (`utils/api_cache.py`) remains the deterministic
+cost-saver for exact repeats; DeepInfra prefix caching is opportunistic savings on top.
 
 **Helper Functions** (in `utils/config.py`):
 - `get_model_config(model_name)` - Get model configuration

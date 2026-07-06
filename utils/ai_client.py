@@ -7,6 +7,7 @@ from datetime import datetime, UTC
 import os
 import json
 import re
+import hashlib
 import anthropic
 from openai import AzureOpenAI
 import openai
@@ -1553,11 +1554,26 @@ def get_cached_tokens(usage):
         return 0
 
 class OpenAIClient(BaseAIClient):
-    """OpenAI client implementation"""
-    
-    def __init__(self, api_key: str, model: str):
-        self.client = openai.OpenAI(api_key=api_key)
+    """OpenAI client implementation.
+
+    Also serves OpenAI-compatible providers (e.g. DeepInfra) via the optional
+    base_url. max_tokens_param controls which token-limit field is sent:
+    OpenAI's newer models require 'max_completion_tokens', while most
+    OpenAI-compatible endpoints (DeepInfra/vLLM) expect the classic 'max_tokens'.
+    """
+
+    def __init__(self, api_key: str, model: str, base_url: Optional[str] = None,
+                 max_tokens_param: str = "max_completion_tokens",
+                 send_prompt_cache_key: bool = False):
+        if base_url:
+            self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        else:
+            self.client = openai.OpenAI(api_key=api_key)
         self.model = model
+        self.max_tokens_param = max_tokens_param
+        # When True, tag requests with a per-prefix 'prompt_cache_key' to nudge
+        # routing toward a warm replica for repeated large prefixes (DeepInfra).
+        self.send_prompt_cache_key = send_prompt_cache_key
           
     def create_message(self, messages: List[AIMessage], tools: List[Dict], max_tokens: int = 0) -> AIResponse:
         # Convert to OpenAI format
@@ -1606,15 +1622,35 @@ class OpenAIClient(BaseAIClient):
                 }
             })
                
-        # Use max_completion_tokens for OpenAI (matching old Query function behavior)
-        # Wrap API call with retry logic
+        # Per-prefix cache-routing key (DeepInfra). Derived from the STABLE prefix
+        # (system message + cache blocks) so all calls sharing that prefix carry the
+        # same key, nudging the provider to route them to a warm replica. The key
+        # must be per-prefix, never a global constant — a shared constant would funnel
+        # all traffic to one replica and thrash its cache. Only worthwhile for large
+        # prefixes (short ones don't benefit from prefix caching anyway).
+        prompt_cache_key = None
+        if self.send_prompt_cache_key:
+            stable_prefix = system_message + full_cache
+            if len(stable_prefix) > 2000:
+                prompt_cache_key = hashlib.sha256(stable_prefix.encode('utf-8')).hexdigest()[:32]
+
+        # Wrap API call with retry logic.
+        # The token-limit field name is provider-dependent (self.max_tokens_param):
+        # OpenAI's newer models require 'max_completion_tokens'; OpenAI-compatible
+        # endpoints such as DeepInfra expect the classic 'max_tokens'.
         def _make_api_call():
-            return self.client.chat.completions.create(
-                model=self.model,
-                max_completion_tokens=max_tokens,
-                tools=openai_tools,
-                messages=openai_messages
-            )
+            api_kwargs = {
+                "model": self.model,
+                self.max_tokens_param: max_tokens,
+                "messages": openai_messages,
+            }
+            # Only send 'tools' when non-empty. OpenAI tolerates an empty list,
+            # but some OpenAI-compatible backends (DeepInfra/vLLM) reject one.
+            if openai_tools:
+                api_kwargs["tools"] = openai_tools
+            if prompt_cache_key:
+                api_kwargs["prompt_cache_key"] = prompt_cache_key
+            return self.client.chat.completions.create(**api_kwargs)
 
         response = make_api_call_with_retry(_make_api_call)
 
@@ -1734,6 +1770,13 @@ def create_ai_client(model_name='', config: Optional[Dict[str, Any]] = None) -> 
     elif platform_lower == "openai":
         api_key = secrets['openai_api_key']
         return OpenAIClient(api_key, api_model_name)
+    elif platform_lower == "deepinfra":
+        # DeepInfra is OpenAI-compatible: reuse OpenAIClient with a base_url and
+        # the classic 'max_tokens' field (DeepInfra ignores 'max_completion_tokens').
+        api_key = secrets['deepinfra_api_key']
+        base_url = model_config.get('base_url', 'https://api.deepinfra.com/v1/openai/')
+        return OpenAIClient(api_key, api_model_name, base_url=base_url,
+                            max_tokens_param="max_tokens", send_prompt_cache_key=True)
     elif platform_lower == "azure":
         # Azure still uses the old AzureOpenAI client (not BaseAIClient)
         # This is a known limitation - Azure support may need to be added later

@@ -1,7 +1,7 @@
 {
   "_comment": "Copy this file to config.json and adjust as needed. config.json is excluded from version control.",
 
-  "_comment_models": "Define all AI models you want to use. The key is the name used throughout config.json to reference this model. 'platform' must be 'OpenAI' or 'Claude'. 'model' is the API model identifier sent to the provider.",
+  "_comment_models": "Define all AI models you want to use. The key is the name used throughout config.json to reference this model. 'platform' must be 'OpenAI', 'Claude', or 'DeepInfra' (an OpenAI-compatible provider). 'model' is the API model identifier sent to the provider. For 'DeepInfra', optionally set 'base_url' (defaults to https://api.deepinfra.com/v1/openai/) and add 'deepinfra_api_key' to api_keys.py.",
   "models": {
     "claude-opus-4-5": {
       "platform": "Claude",
@@ -41,6 +41,12 @@
     "gpt-5.2": {
       "platform": "OpenAI",
       "model": "gpt-5.2",
+      "max_tokens": 8000
+    },
+    "glm-5.2": {
+      "platform": "DeepInfra",
+      "model": "zai-org/GLM-5.2",
+      "base_url": "https://api.deepinfra.com/v1/openai/",
       "max_tokens": 8000
     }
   },

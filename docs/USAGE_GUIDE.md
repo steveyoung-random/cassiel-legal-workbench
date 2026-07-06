@@ -408,6 +408,12 @@ The system uses a model-name-based configuration that supports multiple models f
       "platform": "Claude",
       "model": "claude-3-5-sonnet-20241022",
       "max_tokens": 8000
+    },
+    "glm-5.2": {
+      "platform": "DeepInfra",
+      "model": "zai-org/GLM-5.2",
+      "base_url": "https://api.deepinfra.com/v1/openai/",
+      "max_tokens": 8000
     }
   },
   "current_engine": "gpt-5-nano",
@@ -425,9 +431,10 @@ The system uses a model-name-based configuration that supports multiple models f
 
 **Model Configuration**:
 - Each model has a unique name (e.g., `"gpt-5-nano"`)
-- `platform` specifies the provider (OpenAI, Claude, Azure)
+- `platform` specifies the provider (OpenAI, Claude, Azure, or DeepInfra)
 - `model` specifies the actual API model name
 - Multiple models from the same platform are supported
+- `DeepInfra` is an OpenAI-compatible provider: optionally set `base_url` (defaults to `https://api.deepinfra.com/v1/openai/`) on the model entry, and add a `deepinfra_api_key` to `api_keys.py` (see `api_keys.example.py`)
 
 **Per-Task Model Assignment**:
 Use `model_assignments` to assign specific models to specific tasks. Any task not listed uses `current_engine` as the default. See the comments in `config.json` for the full list of available task names.

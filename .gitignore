@@ -45,6 +45,9 @@ document_issues*.json
 parsing_issues*.json
 
 #Other
+GLM_5.2_EVALUATION.md
+MODEL_TESTING_PLAN.md
+MODEL_EVALUATION.md
 WORKSTREAM_8_PLAN.md
 EDGE_CASE_ANALYSIS.md
 TASK_4_CONTENT_REFRESH.md
